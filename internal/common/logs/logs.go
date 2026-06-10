@@ -1,17 +1,15 @@
 // Package logs configures slog for the monolith: JSON in prod, text
 // locally (LOG_FORMAT), with a handler wrapper that enriches every
-// record from the request context.
-//
-// NOTE: trace_id/span_id enrichment from the OTel span context is part
-// of this handler's contract but requires the OTel API dependency,
-// which is not pinned in go.mod yet. It plugs into contextHandler.Handle
-// without changing any public signature.
+// record from the request context: correlation_id (set by the watermill
+// consumer side) and trace_id/span_id from the OTel span context.
 package logs
 
 import (
 	"context"
 	"log/slog"
 	"os"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NewLogger builds the process logger. format is "json" or "text"
@@ -53,7 +51,7 @@ func CorrelationIDFromContext(ctx context.Context) (string, bool) {
 }
 
 // contextHandler decorates a slog.Handler, adding context-scoped
-// attributes (correlation_id; trace_id/span_id once OTel is wired).
+// attributes (correlation_id, trace_id/span_id).
 type contextHandler struct {
 	next slog.Handler
 }
@@ -65,6 +63,12 @@ func (h contextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 func (h contextHandler) Handle(ctx context.Context, rec slog.Record) error {
 	if id, ok := CorrelationIDFromContext(ctx); ok {
 		rec.AddAttrs(slog.String("correlation_id", id))
+	}
+	if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
+		rec.AddAttrs(
+			slog.String("trace_id", spanCtx.TraceID().String()),
+			slog.String("span_id", spanCtx.SpanID().String()),
+		)
 	}
 	return h.next.Handle(ctx, rec)
 }

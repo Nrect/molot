@@ -1,29 +1,37 @@
 // Command monolith is the composition root of the Molot modular
-// monolith: config -> logs -> observability -> postgres -> migrations
-// -> watermill router -> context services -> HTTP server, all stopped
-// gracefully via one errgroup on SIGINT/SIGTERM.
+// monolith: config → logs → observability → auth → postgres →
+// migrations → watermill router + outbox pub/sub → HTTP router →
+// context services → errgroup{httpServer, watermillRouter}, all
+// stopped gracefully on SIGINT/SIGTERM (ARCHITECTURE.md §9).
 //
-// Infrastructure blocks that depend on not-yet-pinned modules (OTel,
-// pgx/otelsql, goose, watermill, chi) are marked below and wired by the
-// integration agent once go.mod carries the dependencies; the wiring
-// order and ownership stay exactly as documented in ARCHITECTURE.md §9.
+// Bounded contexts plug in at the explicitly marked registration
+// blocks below; everything infrastructural is already wired.
 package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/pressly/goose/v3"
 	"golang.org/x/sync/errgroup"
 
+	"molot/internal/common/auth"
 	"molot/internal/common/config"
 	"molot/internal/common/logs"
+	"molot/internal/common/metrics"
+	"molot/internal/common/postgres"
+	"molot/internal/common/server"
+	"molot/internal/common/tracing"
+	cwatermill "molot/internal/common/watermill"
 )
 
 func main() {
@@ -47,97 +55,153 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// AUTH_MODE=jwks is a documented future. Fail fast with actionable
-	// text instead of accepting tokens we cannot validate. This check
-	// moves into the common/auth middleware constructor once the JWT
-	// dependency lands.
-	if cfg.AuthMode == config.AuthModeJWKS {
-		return errors.New("AUTH_MODE=jwks is not implemented yet: run with AUTH_MODE=local-hs256 and AUTH_HS256_SECRET (JWKS validation is a planned future)")
+	// --- observability -------------------------------------------------
+	tracerProvider, err := tracing.NewTracerProvider(ctx, cfg.OTELExporterOTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	defer shutdownGracefully(logger, "tracer provider", tracerProvider.Shutdown)
+
+	meterProvider, err := metrics.NewMeterProvider(ctx, cfg.OTELExporterOTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("init metrics: %w", err)
+	}
+	defer shutdownGracefully(logger, "meter provider", meterProvider.Shutdown)
+
+	// --- auth -----------------------------------------------------------
+	// AUTH_MODE=jwks is a documented future: NewMiddleware fails fast
+	// with actionable text instead of accepting tokens it cannot validate.
+	authMiddleware, err := auth.NewMiddleware(string(cfg.AuthMode), cfg.AuthHS256Secret)
+	if err != nil {
+		return err
 	}
 
-	// --- observability ------------------------------------------------
-	// OTel tracing + metrics (OTLP gRPC to cfg.OTELExporterOTLPEndpoint,
-	// resource service.name=molot, runtime instrumentation) initialize
-	// here; their Shutdown joins the errgroup teardown.
+	// --- postgres ---------------------------------------------------------
+	// NewDB opens the otelsql-instrumented pgx pool and pings it with ctx.
+	db, err := postgres.NewDB(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("connect postgres: %w", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error("closing postgres pool", "error", closeErr)
+		}
+	}()
 
-	// --- postgres -----------------------------------------------------
-	// db := postgres.NewPool(ctx, cfg.DatabaseURL) — pgx stdlib driver
-	// wrapped with otelsql; closed on shutdown.
-
-	// --- migrations ---------------------------------------------------
-	// goose embedded migrations run here, per context schema
-	// (internal/<ctx>/adapters/migrations), before anything serves.
-
-	// --- watermill ----------------------------------------------------
-	// One message.Router per binary (CorrelationID -> PoisonQueue ->
-	// Retry -> Recoverer), SQL publisher/subscriber over db
-	// (transactional outbox). router.Run joins the errgroup below and
-	// readiness gates on router.Running().
-
-	// --- context registration (filled by the integration agent) -------
-	// auctionSvc := auctionservice.NewService(...)        // RegisterHTTP, RegisterEventHandlers, ClosingWorker
-	// participantSvc := participantservice.NewService(...) // RegisterHTTP
-	// billingSvc := billingservice.NewService(...)         // RegisterHTTP, ExpiryWorker
-	// settlementSvc := settlementservice.NewService(...)   // RegisterHTTP, RegisterEventHandlers
-	// notificationSvc := notificationservice.NewService(...) // RegisterEventHandlers
-
-	// Readiness probes are injected as functions; DB ping and
-	// router.Running() append here as the infrastructure above lands.
-	var readiness []probe
-
-	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler:           healthRoutes(readiness),
-		ReadHeaderTimeout: 5 * time.Second,
+	// --- migrations -------------------------------------------------------
+	// Each bounded context contributes its embedded goose migrations
+	// (embed.FS over internal/<ctx>/adapters/migrations) to this slice;
+	// they run in order before anything serves.
+	var migrations []fs.FS
+	if err := runMigrations(ctx, db, migrations); err != nil {
+		return fmt.Errorf("run migrations: %w", err)
 	}
 
+	// --- watermill --------------------------------------------------------
+	wmLogger := cwatermill.NewLogger(logger)
+
+	deadLetterPublisher, err := cwatermill.NewSQLPublisher(db, wmLogger)
+	if err != nil {
+		return fmt.Errorf("create dead letter publisher: %w", err)
+	}
+
+	wmRouter, err := cwatermill.NewRouter(wmLogger, deadLetterPublisher)
+	if err != nil {
+		return fmt.Errorf("create watermill router: %w", err)
+	}
+
+	// Shared subscriber constructor for every context's event processor:
+	// one consumer group (= offset cursor) per handler name.
+	subscriberConstructor := func(handlerName string) (message.Subscriber, error) {
+		return cwatermill.NewSQLSubscriber(db, handlerName, wmLogger)
+	}
+	_ = subscriberConstructor // used by the context registration blocks below
+
+	// --- http router --------------------------------------------------------
+	rootRouter, apiRouter := server.NewRouter(logger, authMiddleware)
+	_ = apiRouter // contexts mount their handlers here (RegisterHTTP)
+
+	// --- context registration: auction ----------------------------------
+	// auctionSvc := auctionservice.NewService(...)
+	// auctionSvc.RegisterHTTP(apiRouter); auctionSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
+	// g.Go(auctionSvc.ClosingWorker(ctx)) — joins the errgroup below.
+
+	// --- context registration: participant -------------------------------
+	// participantSvc := participantservice.NewService(...)
+	// participantSvc.RegisterHTTP(apiRouter)
+
+	// --- context registration: billing ------------------------------------
+	// billingSvc := billingservice.NewService(...)
+	// billingSvc.RegisterHTTP(apiRouter); g.Go(billingSvc.ExpiryWorker(ctx))
+
+	// --- context registration: settlement ---------------------------------
+	// settlementSvc := settlementservice.NewService(...)
+	// settlementSvc.RegisterHTTP(apiRouter); settlementSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
+
+	// --- context registration: notification -------------------------------
+	// notificationSvc := notificationservice.NewService(...)
+	// notificationSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
+
+	// --- health -----------------------------------------------------------
+	server.RegisterHealthEndpoints(rootRouter, logger, []server.ReadinessProbe{
+		{Name: "postgres", Check: db.PingContext},
+		{Name: "watermill-router", Check: func(context.Context) error {
+			if !wmRouter.IsRunning() {
+				return errors.New("router is not running")
+			}
+			return nil
+		}},
+	})
+
+	// --- run --------------------------------------------------------------
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		logger.Info("http server listening", "addr", srv.Addr)
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("http server: %w", err)
+		if err := wmRouter.Run(ctx); err != nil {
+			return fmt.Errorf("watermill router: %w", err)
 		}
 		return nil
 	})
 
 	g.Go(func() error {
-		<-ctx.Done()
-		logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("http server shutdown: %w", err)
+		// Serve only after the bus is consuming, so readiness cannot
+		// flap during startup.
+		select {
+		case <-wmRouter.Running():
+		case <-ctx.Done():
+			return nil
 		}
-		return nil
+		addr := fmt.Sprintf(":%d", cfg.HTTPPort)
+		logger.Info("http server listening", "addr", addr)
+		return server.RunHTTPServer(ctx, addr, rootRouter)
 	})
 
 	return g.Wait()
 }
 
-// probe is a named readiness check; readyz fails on the first failing one.
-type probe struct {
-	name  string
-	check func(ctx context.Context) error
+// runMigrations applies every context's embedded goose migrations.
+// Per-context version tables arrive together with the first context
+// FS (goose.WithTableName per context); with zero registered contexts
+// this is a no-op.
+func runMigrations(ctx context.Context, db *sql.DB, migrations []fs.FS) error {
+	for _, fsys := range migrations {
+		provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys)
+		if err != nil {
+			return fmt.Errorf("create goose provider: %w", err)
+		}
+		if _, err := provider.Up(ctx); err != nil {
+			return fmt.Errorf("apply migrations: %w", err)
+		}
+	}
+	return nil
 }
 
-func healthRoutes(readiness []probe) http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		for _, p := range readiness {
-			if err := p.check(r.Context()); err != nil {
-				slog.WarnContext(r.Context(), "readiness probe failed", "probe", p.name, "error", err)
-				http.Error(w, p.name+" not ready", http.StatusServiceUnavailable)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-
-	return mux
+// shutdownGracefully flushes an observability provider with its own
+// teardown budget (the run ctx is already cancelled at this point).
+func shutdownGracefully(logger *slog.Logger, name string, shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		logger.Error("shutting down "+name, "error", err)
+	}
 }

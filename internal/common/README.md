@@ -3,19 +3,15 @@
 Контракт для контекст-агентов: какие пакеты есть, какие публичные API стабильны.
 `internal/common` содержит **ноль бизнес-типов** (BOOK_AUDIT правило 4); общие бизнес-понятия (`Money` и т.п.) дублируются по контекстам.
 
-> ⚠️ **Статус: фундамент доставлен частично.** Коммит a5f939c «pin dependencies» фактически пуст —
-> `go mod tidy` выкинул все require (код их ещё не импортировал), в go.mod остался только tool-chain
-> oapi-codegen. Правка go.mod этому агенту запрещена («не хватает депа → deviations, не добавляй»).
-> Реализовано всё, что собирается на stdlib; остальные пакеты **отсутствуют в дереве** — их API
-> зафиксирован ниже как план, чтобы контекст-агенты не гадали. Восстановленный пин-сет — в конце файла.
+> ✅ **Статус: фундамент доставлен полностью.** Все пакеты реализованы, зависимости запинены в
+> go.mod (см. пин-сет в конце). `go build` / `go vet` / `go test -race` / `golangci-lint run` — зелёные.
+> API ниже — фактический, проверен тестами.
 
 ---
 
-## ✅ Реализовано (можно импортировать, API стабилен)
+## `molot/internal/common/errs`
 
-### `molot/internal/common/errs`
-
-Transport-agnostic slug-ошибки. App-слой оборачивает доменные sentinel-ы в `SlugError` на своей границе; ports переводят в HTTP одним хелпером (`server.RespondWithSlugError`, появится позже).
+Transport-agnostic slug-ошибки. App-слой оборачивает доменные sentinel-ы в `SlugError` на своей границе; ports переводят в HTTP одним хелпером (`httperr.RespondWithSlugError`).
 
 ```go
 type ErrorKind struct{ /* закрытый enum */ }
@@ -47,7 +43,7 @@ func KindFromError(err error) ErrorKind              // первый SlugError �
 `return errs.NewConflictError("already-closed").WithCause(auction.ErrAlreadyClosed)` —
 порт получит 409 + `{"slug":"already-closed"}`, лог декоратора — полную причину.
 
-### `molot/internal/common/config`
+## `molot/internal/common/config`
 
 Загрузка env с fail-fast: **одна ошибка перечисляет все** отсутствующие/невалидные переменные разом.
 
@@ -76,9 +72,9 @@ func Load() (Config, error)
 ```
 
 Валидация: валюта — 3 заглавные буквы; duration > 0; порт 1–65535; enum-ы закрыты.
-`AUTH_MODE=jwks` валиден для Load, но старт монолита падает с понятным текстом (см. cmd/monolith/main.go; проверка переедет в `auth.NewMiddleware`).
+`AUTH_MODE=jwks` валиден для Load, но `auth.NewMiddleware` отклоняет его с понятным текстом — старт монолита падает.
 
-### `molot/internal/common/logs`
+## `molot/internal/common/logs`
 
 ```go
 func NewLogger(format string) *slog.Logger
@@ -91,11 +87,132 @@ func ContextWithCorrelationID(ctx context.Context, correlationID string) context
 func CorrelationIDFromContext(ctx context.Context) (string, bool)
 ```
 
-Каждая запись с контекстом, в котором есть correlation id, получает атрибут `correlation_id`.
-**Deviation:** атрибуты `trace_id`/`span_id` из OTel span context — часть контракта этого хендлера,
-но требуют otel-зависимость; добавляются внутрь `contextHandler.Handle` без смены публичных сигнатур.
+Каждая запись обогащается из контекста: `correlation_id` (кладёт consumer-сторона watermill,
+см. observe-middleware) и `trace_id`/`span_id` из OTel span context — автоматически, если в ctx есть активный спан.
 
-### `molot/internal/<ctx>/events` (auction, billing, participant)
+## `molot/internal/common/decorator`
+
+Generic cross-cutting на каждый command/query handler (логирование, RED-метрики, спаны). Один `*Decorators` на контекст-модуль.
+
+```go
+type CommandHandler[C any] interface { Handle(ctx context.Context, cmd C) error }
+type QueryHandler[Q any, R any] interface { Handle(ctx context.Context, query Q) (R, error) }
+
+func NewDecorators(contextName string, logger *slog.Logger,
+    meterProvider metric.MeterProvider, tracerProvider trace.TracerProvider) (*Decorators, error)
+
+func ApplyCommandDecorators[C any](handler CommandHandler[C], d *Decorators) CommandHandler[C]
+func ApplyQueryDecorators[Q, R any](handler QueryHandler[Q, R], d *Decorators) QueryHandler[Q, R]
+```
+
+- Имя use case — из имени типа команды/запроса рефлексией (указатели разыменовываются): `command.PlaceBid` → `PlaceBid`.
+- Спан `commands/<Name>` / `queries/<Name>` (tracing — внешний слой, логи и метрики видят span context).
+- Лог defer-ом на named err: `command handler succeeded|failed` + атрибуты `context`, `handler`, `error`.
+- Гистограммы `molot_command_duration_seconds` / `molot_query_duration_seconds` (unit `s`) с атрибутами `context`/`handler`/`result(ok|err)`.
+
+## `molot/internal/common/metrics`, `molot/internal/common/tracing`
+
+OTLP gRPC init (insecure — локальный collector из docker-compose), resource `service.name=molot`.
+
+```go
+metrics.NewMeterProvider(ctx, endpoint string) (*sdkmetric.MeterProvider, error)
+    // + Go runtime instrumentation; ставит global otel.SetMeterProvider
+tracing.NewTracerProvider(ctx, endpoint string) (*sdktrace.TracerProvider, error)
+    // + W3C propagator (TraceContext+Baggage); ставит global otel.SetTracerProvider
+```
+
+Оба провайдера возвращаются вызывающему; graceful `Shutdown(ctx)` — обязанность main (см. `shutdownGracefully`).
+
+## `molot/internal/common/postgres`
+
+```go
+func NewDB(ctx context.Context, dsn string) (*sql.DB, error)
+    // pgx stdlib драйвер + otelsql (спаны запросов, sql.DBStats метрики пула); пингует с ctx
+
+func RunInTx(ctx context.Context, db *sql.DB, fn func(ctx context.Context, tx *sql.Tx) error) error
+    // named err + defer FinishTransaction — идиома BOOK_AUDIT §4 п.18
+
+func FinishTransaction(err error, tx *sql.Tx) error
+    // экспортирован для адаптеров с собственным BeginTx;
+    // rollback при ошибке, упавший rollback — multierr.Combine (оригинал не теряется)
+```
+
+## `molot/internal/common/auth`
+
+JWT chi-middleware (ARCHITECTURE §8). HS256 локально; `jwks` — задокументированное будущее (конструктор возвращает ошибку → старт падает).
+
+```go
+const ModeLocalHS256 = "local-hs256"; ModeJWKS = "jwks"  // = значениям config.AuthMode
+
+type Role string  // RoleBidder | RoleSeller | RoleOperations
+type User struct { ID uuid.UUID; Role Role }
+
+func NewMiddleware(mode, hs256Secret string) (func(http.Handler) http.Handler, error)
+func ContextWithUser(ctx context.Context, user User) context.Context  // для тестов портов
+func UserFromCtx(ctx context.Context) (User, error)   // нет юзера → errs Unknown ("no-user-in-context")
+func GenerateToken(secret string, user User, ttl time.Duration) (string, error)
+    // dev/тесты; тот же claims-код-путь, что и валидация; отрицательный ttl → просроченный токен
+```
+
+Claims: `sub` (uuid), `role`, `exp` (обязателен), `iat`. Невалидный/отсутствующий токен → `401 {"slug":"unauthorized"}` (та же JSON-форма, что httperr).
+
+## `molot/internal/common/server` (+ `server/httperr`)
+
+```go
+func NewRouter(logger *slog.Logger, authMiddleware func(http.Handler) http.Handler) (root *chi.Mux, api chi.Router)
+    // root: RequestID → ClientIPFromRemoteAddr → otelhttp → span-route-namer →
+    //       slog request log → Recoverer → CORS → security headers (nosniff, X-Frame-Options: deny)
+    // api = root.Route("/api"): + NoCache → JWT-auth; контексты монтируют RegisterHTTP сюда
+
+type ReadinessProbe struct { Name string; Check func(ctx context.Context) error }
+func RegisterHealthEndpoints(r chi.Router, logger *slog.Logger, readiness []ReadinessProbe)
+    // GET /healthz (liveness, всегда 200); GET /readyz (503 на первой упавшей пробе)
+
+func RunHTTPServer(ctx context.Context, addr string, handler http.Handler) error
+    // graceful shutdown по ctx, 10s drain
+
+httperr.RespondWithSlugError(err error, w http.ResponseWriter, r *http.Request)
+    // ErrorKind → статус: IncorrectInput 400, Forbidden 403, NotFound 404,
+    // Conflict 409, Unavailable 502, Unknown/прочее 500; тело {"slug":"..."}
+    // не-SlugError → 500 {"slug":"internal-server-error"}; полная ошибка — только в лог
+```
+
+## `molot/internal/common/watermill`
+
+```go
+const DeadLetterTopic = "events.dead_letter"
+var Marshaler = cqrs.JSONMarshaler{GenerateName: cqrs.StructName}  // единый для bus и processor
+
+func NewLogger(logger *slog.Logger) watermill.LoggerAdapter
+
+func NewRouter(logger watermill.LoggerAdapter, deadLetterPublisher message.Publisher) (*message.Router, error)
+    // middleware СТРОГО: CorrelationID → PoisonQueue(deadLetter) →
+    // Retry{5, exp backoff 100ms×2 cap 30s} → Recoverer → observe
+    // observe: extract W3C trace из metadata → span "events/<HandlerName>",
+    //          correlation_id → ctx (логи хендлера получают его автоматически)
+
+func NewSQLSubscriber(db *sql.DB, consumerGroup string, logger watermill.LoggerAdapter) (message.Subscriber, error)
+    // consumer group = имя хендлера (независимый offset); InitializeSchema: true
+func NewSQLPublisher(db *sql.DB, logger watermill.LoggerAdapter) (message.Publisher, error)
+    // по пулу, AutoInitializeSchema: true; для инфраструктуры (dead letter)
+func NewTxPublisher(tx *sql.Tx, logger watermill.LoggerAdapter) (message.Publisher, error)
+    // outbox: publish в открытой *sql.Tx; схему НЕ инициализирует (implicit commit)
+
+func NewTracingPublisherDecorator(pub message.Publisher) message.Publisher
+    // producer-спан "publish <topic>" + inject W3C traceparent в metadata
+    // (NewSQLPublisher/NewTxPublisher уже обёрнуты)
+
+func NewEventBus(publisher message.Publisher,
+    generateTopic func(eventName string) string, logger watermill.LoggerAdapter) (*cqrs.EventBus, error)
+func NewEventProcessor(router *message.Router,
+    generateTopic func(eventName string) string,
+    subscriberConstructor func(handlerName string) (message.Subscriber, error),
+    logger watermill.LoggerAdapter) (*cqrs.EventProcessor, error)
+```
+
+`generateTopic` мапит имя события (`AuctionClosedV1`) на топик — контексты публикуют свои `events.Topic` константы.
+
+## `molot/internal/<ctx>/events` (auction, billing, participant)
 
 Не common, но фиксируем здесь как часть фундамента: единственные пакеты контекстов, импортируемые снаружи. Только плоские V1-структуры с json-тегами + константа топика:
 
@@ -109,24 +226,20 @@ participantevents.Topic = "participant-events" // 2 события
 
 ---
 
-## 🚫 Отсутствуют (НЕ импортировать — пакетов нет в дереве)
+## Отклонения от изначального плана (зафиксированы как контракт)
 
-Заблокированы пустым пин-коммитом (см. статус выше). Планируемый API — из ARCHITECTURE.md §9,
-здесь для ориентира контекст-агентам; сигнатуры станут контрактом только после реализации.
-
-| Пакет | Назначение | Ключевой планируемый API |
+| Было в плане | Стало | Почему |
 |---|---|---|
-| `decorator` | generic cross-cutting на каждый хендлер | `CommandHandler[C]`, `QueryHandler[Q,R]`, `ApplyCommandDecorators[C](h, *slog.Logger, *MetricsClient, trace.Tracer)`, `ApplyQueryDecorators[Q,R](...)`; лог defer-ом на named err, RED `molot_command_duration_seconds{context,handler,result}`, span `commands/<Name>` |
-| `metrics` | OTLP gRPC MeterProvider + runtime instrumentation, resource `service.name=molot` | `NewMeterProvider(ctx, endpoint) (*sdkmetric.MeterProvider, error)` |
-| `tracing` | OTLP gRPC TracerProvider, W3C propagation | `NewTracerProvider(ctx, endpoint) (*sdktrace.TracerProvider, error)` |
-| `postgres` | пул database/sql поверх pgx stdlib + otelsql; транзакции | `NewPool(ctx, databaseURL) (*sql.DB, error)`, `RunInTx(ctx, db, fn) error`, `FinishTransaction(err, tx) error` (multierr.Combine), goose-хелпер миграций |
-| `auth` | JWT middleware (HS256 local; jwks — ошибка конфигурации со старта), типизированный user в ctx | `User{ID uuid.UUID; Role Role}`, `UserFromCtx(ctx) (User, error)`, `NewMiddleware(mode, secret) (func(http.Handler) http.Handler, error)`, `GenerateFakeJWT(secret, user, ttl)` — тот же код-путь для dev/тестов |
-| `server` | chi-роутер, стек §8, healthz/readyz с инжектируемыми пробами, запуск/shutdown | `New(...)`, `RespondWithSlugError(err, w, r)` — маппинг ErrorKind→HTTP, тело `{"slug": "..."}` |
-| `watermill` | router (CorrelationID→PoisonQueue("events.dead_letter")→Retry{5,exp≤30s}→Recoverer), SQL pub/sub v4 (outbox), cqrs bus/processor (`JSONMarshaler{GenerateName: cqrs.StructName}`), trace propagation через metadata | `NewRouter`, `NewSQLPublisher/NewSQLSubscriber`, `NewEventBus/NewEventProcessor`, `PublishInTx(ctx, tx, ...)` |
+| `postgres.NewPool` | `postgres.NewDB(ctx, dsn)` | по финальному ТЗ интеграции; пингует внутри |
+| `ApplyCommandDecorators[C](h, logger, metricsClient, tracer)` | `NewDecorators(contextName, …)` + `Apply*(h, d)` | контекст-модуль задаётся один раз; generic-методы в Go невозможны |
+| `auth.GenerateFakeJWT` | `auth.GenerateToken` | тот же код-путь, имя без "fake" — это полноценный HS256-эмитент для local-mode |
+| `server.New` | `server.NewRouter → (root, api)` | контекстам нужен доступ к /api-группе ПОСЛЕ применения её middleware |
+| `server.RespondWithSlugError` | подпакет `server/httperr` | ports импортируют httperr, не тянут весь server |
+| `middleware.RealIP` (§8) | `middleware.ClientIPFromRemoteAddr` | RealIP deprecated в chi 5.3 как спуфабельный (GHSA-3fxj-6jh8-hvhx); за доверенным прокси → `ClientIPFromXFFTrustedProxies(n)` |
+| `watermill.PublishInTx` | `watermill.NewTxPublisher(tx, logger)` | реальный API watermill-sql v4: publisher конструируется над `Tx` |
+| readiness `[]func(ctx) error` | `[]ReadinessProbe{Name, Check}` | имя пробы нужно в логе и теле 503 |
 
-## Восстановленный пин-сет (для оркестратора)
-
-Версии восстановлены по burst-загрузке module cache в момент коммита a5f939c (2026-06-10/11):
+## Пин-сет (фактический, в go.mod)
 
 ```
 github.com/ThreeDotsLabs/watermill v1.5.2
@@ -134,15 +247,16 @@ github.com/ThreeDotsLabs/watermill-sql/v4 v4.1.5
 github.com/go-chi/chi/v5 v5.3.0
 github.com/jackc/pgx/v5 v5.10.0
 github.com/pressly/goose/v3 v3.27.1
-github.com/oapi-codegen/runtime v1.4.1
-go.opentelemetry.io/otel v1.44.0 (+ trace, metric, sdk, sdk/metric v1.44.0)
+github.com/oapi-codegen/runtime v1.4.1 (+ oapi-codegen/v2 v2.7.1 как tool)
+go.opentelemetry.io/otel v1.44.0 (+ metric, sdk, sdk/metric, trace v1.44.0)
 go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0
 go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
-github.com/XSAM/otelsql v0.42.0        # не в burst — новейшая в кэше
-github.com/golang-jwt/jwt/v5 v5.3.1    # не в burst — новейшая в кэше
+github.com/XSAM/otelsql v0.42.0
+github.com/golang-jwt/jwt/v5 v5.3.1
 github.com/google/uuid v1.6.0
 go.uber.org/multierr v1.11.0
-github.com/stretchr/testify v1.11.1    # уже в go.sum, нет в require
+github.com/stretchr/testify v1.11.1
+golang.org/x/sync v0.20.0
 ```
