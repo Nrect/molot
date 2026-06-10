@@ -1,0 +1,168 @@
+{
+  "uid": "molot-bus-saga",
+  "title": "Molot — Bus & Saga",
+  "description": "Watermill bus health (dead letter, lag, retries) and settlement saga flow. Queries use base metric names; the OTel->Prometheus exporter may add convention suffixes/labels — names are verified on smoke. Dead letter > 0 is always an incident (ARCHITECTURE §6.8, runbook in docs/operations.md).",
+  "tags": ["molot"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Dead letter size (ALERT > 0)",
+      "description": "molot_bus_dead_letter_size — rows in watermill_events_dead_letter. Any value > 0 is an incident, never business noise: follow the redelivery runbook in docs/operations.md.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        { "refId": "A", "expr": "max(molot_bus_dead_letter_size)", "legendFormat": "dead letter" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Dead letter size over time (alert panel)",
+      "description": "Alert rule: molot_bus_dead_letter_size > 0 for 1m -> page immediately (ARCHITECTURE §6.8).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "max(molot_bus_dead_letter_size)", "legendFormat": "dead letter size" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Oldest message age by topic (outbox lag)",
+      "description": "molot_bus_oldest_message_age_seconds — growing age means consumers are not keeping up with the outbox.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (topic) (molot_bus_oldest_message_age_seconds)",
+          "legendFormat": "{{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Bus retries by handler",
+      "description": "rate(molot_bus_retries_total) from the Retry middleware — early degradation signal.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler) (rate(molot_bus_retries_total[$__rate_interval]))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Saga transitions",
+      "description": "molot_saga_transitions_total{from,to,reason} from the settlement repo adapter; watch growth of reason=second_chance_declined and the compensation branches.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (from, to, reason) (rate(molot_saga_transitions_total[$__rate_interval]))",
+          "legendFormat": "{{from}} -> {{to}} ({{reason}})"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Max non-terminal settlement age",
+      "description": "molot_settlement_nonterminal_age_seconds — stuck sagas; alert when > 2 x PAYMENT_TERM (ARCHITECTURE §11).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 172800 },
+              { "color": "red", "value": 345600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        { "refId": "A", "expr": "max(molot_settlement_nonterminal_age_seconds)", "legendFormat": "max age" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Worker due backlog",
+      "description": "molot_worker_due_backlog{worker} — closings/expirations not keeping up; alert above threshold.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (worker) (molot_worker_due_backlog)",
+          "legendFormat": "{{worker}}"
+        }
+      ]
+    }
+  ]
+}

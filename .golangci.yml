@@ -1,0 +1,122 @@
+# golangci-lint v1.64.x config.
+# Layer directions (BOOK_AUDIT rules 2-4) are enforced with depguard:
+# domain -> nothing above it; app -> domain only; ports never import adapters;
+# internal/common holds zero business types and never imports a context.
+
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - revive
+    - gocritic
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      domain-imports-nothing-above:
+        list-mode: lax
+        files:
+          - "**/internal/**/domain/**"
+        deny:
+          - pkg: molot/internal/auction/app
+            desc: domain must not import app
+          - pkg: molot/internal/auction/ports
+            desc: domain must not import ports
+          - pkg: molot/internal/auction/adapters
+            desc: domain must not import adapters
+          - pkg: molot/internal/auction/service
+            desc: domain must not import service
+          - pkg: molot/internal/participant/app
+            desc: domain must not import app
+          - pkg: molot/internal/participant/ports
+            desc: domain must not import ports
+          - pkg: molot/internal/participant/adapters
+            desc: domain must not import adapters
+          - pkg: molot/internal/participant/service
+            desc: domain must not import service
+          - pkg: molot/internal/billing/app
+            desc: domain must not import app
+          - pkg: molot/internal/billing/ports
+            desc: domain must not import ports
+          - pkg: molot/internal/billing/adapters
+            desc: domain must not import adapters
+          - pkg: molot/internal/billing/service
+            desc: domain must not import service
+          - pkg: molot/internal/settlement/app
+            desc: domain must not import app
+          - pkg: molot/internal/settlement/ports
+            desc: domain must not import ports
+          - pkg: molot/internal/settlement/adapters
+            desc: domain must not import adapters
+          - pkg: molot/internal/settlement/service
+            desc: domain must not import service
+      app-imports-domain-only:
+        list-mode: lax
+        files:
+          - "**/internal/**/app/**"
+        deny:
+          - pkg: molot/internal/auction/ports
+            desc: app must not import ports
+          - pkg: molot/internal/auction/adapters
+            desc: app must not import adapters
+          - pkg: molot/internal/participant/ports
+            desc: app must not import ports
+          - pkg: molot/internal/participant/adapters
+            desc: app must not import adapters
+          - pkg: molot/internal/billing/ports
+            desc: app must not import ports
+          - pkg: molot/internal/billing/adapters
+            desc: app must not import adapters
+          - pkg: molot/internal/settlement/ports
+            desc: app must not import ports
+          - pkg: molot/internal/settlement/adapters
+            desc: app must not import adapters
+      ports-never-import-adapters:
+        list-mode: lax
+        files:
+          - "**/internal/**/ports/**"
+        deny:
+          - pkg: molot/internal/auction/adapters
+            desc: ports must not import adapters
+          - pkg: molot/internal/participant/adapters
+            desc: ports must not import adapters
+          - pkg: molot/internal/billing/adapters
+            desc: ports must not import adapters
+          - pkg: molot/internal/settlement/adapters
+            desc: ports must not import adapters
+          - pkg: molot/internal/notification/adapters
+            desc: ports must not import adapters
+      common-is-business-free:
+        list-mode: lax
+        files:
+          - "**/internal/common/**"
+        deny:
+          - pkg: molot/internal/auction
+            desc: internal/common must not import a bounded context
+          - pkg: molot/internal/participant
+            desc: internal/common must not import a bounded context
+          - pkg: molot/internal/billing
+            desc: internal/common must not import a bounded context
+          - pkg: molot/internal/settlement
+            desc: internal/common must not import a bounded context
+          - pkg: molot/internal/notification
+            desc: internal/common must not import a bounded context
+  revive:
+    rules:
+      - name: exported
+        disabled: true # domain API is documented in ARCHITECTURE.md; per-symbol comments only where code does not speak
+issues:
+  exclude-files:
+    - ".*\\.gen\\.go$" # make openapi output, never hand-edited
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gocritic

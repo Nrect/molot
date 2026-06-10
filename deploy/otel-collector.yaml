@@ -1,0 +1,35 @@
+# OTel collector pipeline for the local stack:
+# app (OTLP gRPC) -> batch -> traces to Jaeger (OTLP), metrics to Prometheus scrape endpoint.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+
+exporters:
+  # Traces -> Jaeger via OTLP (the legacy `jaeger` exporter was removed from the collector;
+  # jaeger all-in-one ingests OTLP gRPC on 4317).
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # Metrics exposed for Prometheus to scrape at otel-collector:8889.
+  # NOTE: the exporter applies OTel->Prometheus naming conventions (unit suffixes,
+  # otel_scope_* labels); dashboard queries use base metric names and are verified on smoke.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

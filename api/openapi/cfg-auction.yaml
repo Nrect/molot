@@ -1,0 +1,9 @@
+# oapi-codegen strict-server config — auction context.
+# Invoked from the repo root by `make openapi`; output is CWD-relative.
+package: ports
+generate:
+  chi-server: true
+  strict-server: true
+  models: true
+  embedded-spec: true
+output: internal/auction/ports/openapi.gen.go

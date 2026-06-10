@@ -1,0 +1,164 @@
+{
+  "uid": "molot-contexts-red",
+  "title": "Molot — Contexts RED",
+  "description": "RED per use case from the metrics decorator (molot_command_duration_seconds / molot_query_duration_seconds, labels: context, handler, result). Queries use base metric names; the OTel->Prometheus exporter may add convention suffixes/labels — names are verified on smoke.",
+  "tags": ["molot"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "context",
+        "label": "context",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(molot_command_duration_seconds_count, context)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1
+      },
+      {
+        "name": "handler",
+        "label": "handler",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(molot_command_duration_seconds_count{context=~\"$context\"}, handler)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Commands — rate",
+      "description": "Base name molot_command_duration_seconds_count; verify exact exported name on smoke.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler) (rate(molot_command_duration_seconds_count{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval]))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Commands — errors",
+      "description": "result=\"error\" series of the RED decorator counter.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler) (rate(molot_command_duration_seconds_count{context=~\"$context\",handler=~\"$handler\",result=\"error\"}[$__rate_interval]))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Commands — duration p95 / p99",
+      "description": "histogram_quantile over molot_command_duration_seconds_bucket.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(molot_command_duration_seconds_bucket{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{handler}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, handler) (rate(molot_command_duration_seconds_bucket{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Queries — rate",
+      "description": "Base name molot_query_duration_seconds_count; verify exact exported name on smoke.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler) (rate(molot_query_duration_seconds_count{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval]))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Queries — errors",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler) (rate(molot_query_duration_seconds_count{context=~\"$context\",handler=~\"$handler\",result=\"error\"}[$__rate_interval]))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Queries — duration p95 / p99",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(molot_query_duration_seconds_bucket{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{handler}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, handler) (rate(molot_query_duration_seconds_bucket{context=~\"$context\",handler=~\"$handler\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{handler}}"
+        }
+      ]
+    }
+  ]
+}

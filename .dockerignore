@@ -1,0 +1,11 @@
+.git
+.github
+docs
+deploy
+build
+docker-compose.yml
+Makefile
+.env
+.env.example
+.golangci.yml
+**/*.md

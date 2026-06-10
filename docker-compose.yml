@@ -1,0 +1,76 @@
+# Molot local stack: app + Postgres + observability pipeline
+# (OTel collector -> Jaeger for traces, -> Prometheus scrape for metrics, Grafana on top).
+# Whole system comes up with a single `docker compose up` (BOOK_AUDIT rule 55).
+
+services:
+  postgres:
+    image: postgres:16.9-alpine
+    environment:
+      POSTGRES_USER: molot
+      POSTGRES_PASSWORD: molot
+      POSTGRES_DB: molot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U molot -d molot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+    env_file:
+      - .env.example
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.119.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.65.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true" # collector forwards traces to jaeger:4317 (OTLP gRPC)
+    ports:
+      - "16686:16686" # UI
+
+  prometheus:
+    image: prom/prometheus:v3.2.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      # Anonymous admin is for the local stack only; never reuse in prod.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
+
+volumes:
+  pgdata:

@@ -1,0 +1,70 @@
+# CI merge gate: lint + build + unit (-race) + integration (real Postgres) + docker image build.
+# All test levels gate the merge (BOOK_AUDIT rule 46).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./... -count=1
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.9-alpine
+        env:
+          POSTGRES_USER: molot
+          POSTGRES_PASSWORD: molot
+          POSTGRES_DB: molot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U molot -d molot"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://molot:molot@localhost:5432/molot?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags integration ./... -count=1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f build/Dockerfile -t molot:ci .
