@@ -78,7 +78,10 @@ tests/                   component + e2e
 
 ## Что дальше (план развития)
 
+Полный список кандидатов с приоритетами — **[docs/ROADMAP.md](docs/ROADMAP.md)**. Кратко:
+
+- Алерты + SLO burn-rate поверх готовых метрик; k6-нагрузка (конкурентные ставки); хаос через Toxiproxy.
+- Ledger двойной записи в billing; supply-chain CI (govulncheck/trivy/SBOM/cosign).
 - Kafka вместо watermill-sql — замена publisher/subscriber + forwarder, контракты не меняются (ADR-0002).
-- Вынос контекста в сервис — события уже версионированы, фасад заменяется на gRPC-адаптер.
-- Read store (Elastic и т.п.) — за существующими read-model интерфейсами.
-- Алерты поверх готовых метрик: `molot_bus_dead_letter_size > 0`, возраст незавершённых саг.
+- Вынос контекста в сервис — события версионированы, фасад заменяется на gRPC-адаптер.
+- Kubernetes (helm + kind в CI), release-пайплайн, бэкапы с restore-тестом.
