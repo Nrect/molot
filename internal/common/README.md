@@ -1,6 +1,6 @@
 # internal/common — инфраструктурный фундамент
 
-Контракт для контекст-агентов: какие пакеты есть, какие публичные API стабильны.
+Контракт для разработчиков контекстов: какие пакеты есть, какие публичные API стабильны.
 `internal/common` содержит **ноль бизнес-типов** (BOOK_AUDIT правило 4); общие бизнес-понятия (`Money` и т.п.) дублируются по контекстам.
 
 > ✅ **Статус: фундамент доставлен полностью.** Все пакеты реализованы, зависимости запинены в
@@ -190,9 +190,12 @@ var Marshaler = cqrs.JSONMarshaler{GenerateName: cqrs.StructName}  // едины
 
 func NewLogger(logger *slog.Logger) watermill.LoggerAdapter
 
-func NewRouter(logger watermill.LoggerAdapter, deadLetterPublisher message.Publisher) (*message.Router, error)
+func NewRouter(logger watermill.LoggerAdapter, deadLetterPublisher message.Publisher, meterProvider metric.MeterProvider) (*message.Router, error)
     // middleware СТРОГО: CorrelationID → PoisonQueue(deadLetter) →
-    // Retry{5, exp backoff 100ms×2 cap 30s} → Recoverer → observe
+    // Retry{5, exp backoff 100ms×2 cap 30s} → retryCounter →
+    // Recoverer → observe
+    // retryCounter: при ошибке хендлера инкрементирует
+    //   molot_bus_retries_total{handler} — каждая ошибка = один retry-триггер
     // observe: extract W3C trace из metadata → span "events/<HandlerName>",
     //          correlation_id → ctx (логи хендлера получают его автоматически)
 
@@ -220,7 +223,8 @@ func RegisterBusMetrics(db *sql.DB, meterProvider metric.MeterProvider) error
     // observable-гейджи §11 по watermill-таблицам (скан на каждом metric collection):
     // molot_bus_dead_letter_size — не доставленные заново сообщения dead-letter топика;
     // molot_bus_oldest_message_age_seconds{topic} — возраст старейшего сообщения,
-    // не ack-нутого самой медленной consumer group топика
+    // не ack-нутого самой медленной consumer group топика.
+    // Счётчик molot_bus_retries_total{handler} регистрируется в NewRouter.
 ```
 
 `generateTopic` мапит имя события (`AuctionClosedV1`) на топик — контексты публикуют свои `events.Topic` константы.

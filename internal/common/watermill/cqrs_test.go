@@ -12,6 +12,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill/pubsub/gochannel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	cwatermill "molot/internal/common/watermill"
 )
@@ -56,7 +57,7 @@ func TestNewEventProcessorAcksUnknownEventTypesOnTopic(t *testing.T) {
 	logger := cwatermill.NewLogger(slog.New(slog.DiscardHandler))
 
 	deadLetter := &concurrentRecordingPublisher{}
-	router, err := cwatermill.NewRouter(logger, deadLetter)
+	router, err := cwatermill.NewRouter(logger, deadLetter, metricnoop.NewMeterProvider())
 	require.NoError(t, err)
 
 	// BlockPublishUntilSubscriberAck makes Publish return only once the

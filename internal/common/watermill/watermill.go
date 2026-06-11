@@ -15,7 +15,9 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 
 	"molot/internal/common/logs"
@@ -38,14 +40,18 @@ func NewLogger(logger *slog.Logger) wm.LoggerAdapter {
 // middleware chain in this strict order:
 //
 //	CorrelationID → PoisonQueue(deadLetterPublisher, "events.dead_letter")
-//	→ Retry{5 attempts, exponential backoff capped at 30s} → Recoverer
+//	→ Retry{5 attempts, exponential backoff capped at 30s} → retryCounter
+//	→ Recoverer → observe
 //
 // Recoverer sits innermost so panics become errors that Retry retries
-// and PoisonQueue ultimately parks. The observe middleware (innermost
-// of all) starts an "events/<HandlerName>" span from the trace context
-// propagated in message metadata and puts the correlation id into the
-// handler context for log enrichment.
-func NewRouter(logger wm.LoggerAdapter, deadLetterPublisher message.Publisher) (*message.Router, error) {
+// and PoisonQueue ultimately parks. retryCounter sits between Retry and
+// Recoverer: each handler error visible at that layer is exactly one
+// retry trigger, and it increments molot_bus_retries_total{handler}.
+// The observe middleware (innermost of all) starts an
+// "events/<HandlerName>" span from the trace context propagated in
+// message metadata and puts the correlation id into the handler context
+// for log enrichment.
+func NewRouter(logger wm.LoggerAdapter, deadLetterPublisher message.Publisher, meterProvider metric.MeterProvider) (*message.Router, error) {
 	router, err := message.NewRouter(message.RouterConfig{}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("create watermill router: %w", err)
@@ -56,6 +62,13 @@ func NewRouter(logger wm.LoggerAdapter, deadLetterPublisher message.Publisher) (
 		return nil, fmt.Errorf("create poison queue middleware: %w", err)
 	}
 
+	retriesTotal, err := meterProvider.Meter("molot/internal/common/watermill").
+		Int64Counter("molot_bus_retries_total",
+			metric.WithDescription("Number of message handler errors that triggered a retry attempt, per handler"))
+	if err != nil {
+		return nil, fmt.Errorf("create retries counter: %w", err)
+	}
+
 	retry := middleware.Retry{
 		MaxRetries:      5,
 		InitialInterval: 100 * time.Millisecond,
@@ -64,10 +77,25 @@ func NewRouter(logger wm.LoggerAdapter, deadLetterPublisher message.Publisher) (
 		Logger:          logger,
 	}
 
+	retryCounter := func(h message.HandlerFunc) message.HandlerFunc {
+		return func(msg *message.Message) ([]*message.Message, error) {
+			produced, err := h(msg)
+			if err != nil {
+				handlerName := message.HandlerNameFromCtx(msg.Context())
+				if handlerName == "" {
+					handlerName = "unknown"
+				}
+				retriesTotal.Add(msg.Context(), 1, metric.WithAttributes(attribute.String("handler", handlerName)))
+			}
+			return produced, err
+		}
+	}
+
 	router.AddMiddleware(
 		middleware.CorrelationID,
 		poisonQueue,
 		retry.Middleware,
+		retryCounter,
 		middleware.Recoverer,
 		observe,
 	)

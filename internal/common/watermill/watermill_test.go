@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -93,6 +94,7 @@ func TestNewRouter(t *testing.T) {
 	router, err := cwatermill.NewRouter(
 		cwatermill.NewLogger(slog.New(slog.DiscardHandler)),
 		&recordingPublisher{},
+		metricnoop.NewMeterProvider(),
 	)
 
 	require.NoError(t, err)

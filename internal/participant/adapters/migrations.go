@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	wm "github.com/ThreeDotsLabs/watermill"
 
@@ -36,7 +37,7 @@ func mustSubMigrations() fs.FS {
 // of this topic in the process, the first publish would otherwise hit a
 // missing table.
 func InitializeEventsSchema(db *sql.DB, logger wm.LoggerAdapter) error {
-	subscriber, err := cwatermill.NewSQLSubscriber(db, "participant-events-schema-init", logger)
+	subscriber, err := cwatermill.NewSQLSubscriber(db, "participant-events-schema-init", time.Second, logger)
 	if err != nil {
 		return fmt.Errorf("create schema-init subscriber: %w", err)
 	}

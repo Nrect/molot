@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"molot/internal/billing/app/command"
 	"molot/internal/billing/domain/invoice"
@@ -40,6 +42,7 @@ type ExpiryWorker struct {
 	clock    workerClock
 	logger   *slog.Logger
 
+	tracer       trace.Tracer
 	tickDuration metric.Float64Histogram
 	dueBacklog   metric.Int64Gauge
 }
@@ -51,6 +54,7 @@ func NewExpiryWorker(
 	clk workerClock,
 	logger *slog.Logger,
 	meterProvider metric.MeterProvider,
+	tracerProvider trace.TracerProvider,
 ) *ExpiryWorker {
 	if due == nil {
 		panic("NewExpiryWorker: nil due scan")
@@ -69,6 +73,9 @@ func NewExpiryWorker(
 	}
 	if meterProvider == nil {
 		panic("NewExpiryWorker: nil meter provider")
+	}
+	if tracerProvider == nil {
+		panic("NewExpiryWorker: nil tracer provider")
 	}
 
 	meter := meterProvider.Meter("molot/internal/billing/ports")
@@ -89,6 +96,7 @@ func NewExpiryWorker(
 		interval:     interval,
 		clock:        clk,
 		logger:       logger,
+		tracer:       tracerProvider.Tracer("molot/internal/billing/ports"),
 		tickDuration: tickDuration,
 		dueBacklog:   dueBacklog,
 	}
@@ -111,6 +119,9 @@ func (w *ExpiryWorker) Run(ctx context.Context) error {
 }
 
 func (w *ExpiryWorker) tick(ctx context.Context) {
+	ctx, span := w.tracer.Start(ctx, "worker/expiry.tick")
+	defer span.End()
+
 	workerAttr := metric.WithAttributes(attribute.String("worker", "expiry"))
 	start := time.Now()
 	defer func() {
@@ -119,10 +130,13 @@ func (w *ExpiryWorker) tick(ctx context.Context) {
 
 	ids, err := w.due.PendingDueBefore(ctx, w.clock.Now(), expiryBatchLimit)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		w.logger.ErrorContext(ctx, "expiry worker: due scan failed",
 			slog.String("context", "billing"), slog.Any("error", err))
 		return
 	}
+	span.SetStatus(codes.Ok, "")
 	w.dueBacklog.Record(ctx, int64(len(ids)), workerAttr)
 
 	for _, id := range ids {

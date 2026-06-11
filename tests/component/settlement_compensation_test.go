@@ -18,7 +18,6 @@ package component_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -35,28 +34,57 @@ import (
 	"molot/tests"
 )
 
-// buildApp assembles a second in-process application bound to the same
-// Postgres DB as the shared suite (unique IDs prevent collisions) with
-// the given PSPMode and paymentTerm, and starts its background workers.
-// The returned client speaks to its httptest.Server.
-func buildApp(t *testing.T, db *sql.DB, pspMode string, paymentTerm time.Duration) (
+// buildApp assembles a second in-process application with the given PSPMode
+// and paymentTerm and starts its background workers. The returned client
+// speaks to its httptest.Server.
+//
+// Each secondary application gets its OWN database (created here, dropped on
+// cleanup). Sharing one DB is not an option: consumer-group names are equal
+// across application instances, so two apps on one DB would compete for the
+// same messages while carrying different configs — e.g. the shared app's saga
+// could issue an invoice for this test's auction with the wrong payment term.
+func buildApp(t *testing.T, pspMode string, paymentTerm time.Duration) (
 	*monolith.Application, *tests.Client,
 ) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+
+	adminDSN := os.Getenv("COMPONENT_DATABASE_URL")
+	require.NotEmpty(t, adminDSN, "COMPONENT_DATABASE_URL must be set")
+
+	db, cleanupDB, err := createIsolatedDB(ctx, adminDSN)
+	require.NoError(t, err, "create isolated database")
 
 	app, err := monolith.NewComponentTestApplication(
 		ctx, db, testHS256Secret, testPlatformCurrency,
 		paymentTerm, pspMode,
 	)
-	require.NoError(t, err, "assemble secondary test application")
+	if err != nil {
+		cleanupDB()
+		require.NoError(t, err, "assemble secondary test application")
+	}
 
+	workersDone := make(chan struct{})
 	go func() {
+		defer close(workersDone)
 		if wErr := app.RunWorkers(ctx); wErr != nil && ctx.Err() == nil {
 			t.Logf("secondary RunWorkers: %v", wErr)
 		}
 	}()
+
+	// Ordered teardown: cancel → wait for RunWorkers to exit (the router
+	// drains in-flight handlers) → close the pool and drop the database.
+	// Without the wait, subscribers keep polling a closed pool / dropped
+	// database and spam teardown errors into the next test's log window.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-workersDone:
+		case <-time.After(10 * time.Second):
+			t.Log("secondary RunWorkers did not exit within 10 s; dropping DB anyway")
+		}
+		cleanupDB()
+	})
 
 	srv := httptest.NewServer(app.HTTPHandler)
 	t.Cleanup(srv.Close)
@@ -81,30 +109,14 @@ func buildApp(t *testing.T, db *sql.DB, pspMode string, paymentTerm time.Duratio
 	return nil, nil
 }
 
-// getCompDB opens a DB connection from COMPONENT_DATABASE_URL for tests that
-// assemble a second application instance. The connection is closed via
-// t.Cleanup.
-func getCompDB(t *testing.T) *sql.DB {
-	t.Helper()
-	dsn := os.Getenv("COMPONENT_DATABASE_URL")
-	require.NotEmpty(t, dsn, "COMPONENT_DATABASE_URL must be set")
-	db, err := monolith.NewDB(context.Background(), dsn)
-	require.NoError(t, err, "open component DB")
-	t.Cleanup(func() { db.Close() })
-	return db
-}
-
 // TestSettlementCompensation_RunnerUp: winner's invoice expires (the winner
 // does not pay within the short payment term) → second-chance offer issued
 // to the qualified runner-up → runner-up pays → saga Settled.
 func TestSettlementCompensation_RunnerUp(t *testing.T) {
-	t.Parallel()
-
 	// Very short payment term so the ExpiryWorker fires quickly.
 	const shortPaymentTerm = 3 * time.Second
 
-	db := getCompDB(t)
-	_, c := buildApp(t, db, billingadapters.PSPModeSuccess, shortPaymentTerm)
+	_, c := buildApp(t, billingadapters.PSPModeSuccess, shortPaymentTerm)
 
 	// --- participants --------------------------------------------------------
 	sellerID := uuid.New()
@@ -136,23 +148,26 @@ func TestSettlementCompensation_RunnerUp(t *testing.T) {
 
 	// runner-up bids first, winner outbids — runner-up qualifies because it
 	// bid at the start price which is >= reserve (no reserve here, always met).
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, runnerUpToken)
 
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 110_000, Currency: "EUR",
 	}, winnerToken)
 
+	// Poll variants only inside Eventually: require.* in the condition
+	// goroutine Goexits it and freezes Eventually (see tests/client.go).
 	assert.Eventually(t, func() bool {
-		return c.AuctionCard(t, auctionID, winnerToken).Status == "closed"
+		card, ok := c.AuctionCardPoll(t, auctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond, "auction not closed")
 
 	// saga issues invoice for the winner.
 	var firstInvoiceID uuid.UUID
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		if s.State == "awaiting_payment" && s.InvoiceID != nil {
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		if ok && s.State == "awaiting_payment" && s.InvoiceID != nil {
 			firstInvoiceID = *s.InvoiceID
 			return true
 		}
@@ -164,8 +179,8 @@ func TestSettlementCompensation_RunnerUp(t *testing.T) {
 
 	// --- invoice expires → saga awards runner-up → SecondChancePayment -------
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "second_chance_payment"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && s.State == "second_chance_payment"
 	}, 20*time.Second, 200*time.Millisecond, "saga did not reach second_chance_payment")
 
 	s := c.GetSettlementStatus(t, auctionID, opsToken)
@@ -179,8 +194,8 @@ func TestSettlementCompensation_RunnerUp(t *testing.T) {
 
 	// --- saga settles --------------------------------------------------------
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "settled"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && s.State == "settled"
 	}, 10*time.Second, 200*time.Millisecond, "saga did not settle after runner-up payment")
 
 	inv := c.GetInvoice(t, secondInvoiceID, runnerUpToken)
@@ -192,12 +207,9 @@ func TestSettlementCompensation_RunnerUp(t *testing.T) {
 // qualifies) → Relist (gen=0); relisted auction also fails → FailedUnsold
 // (gen=1 → cap reached, no further relists).
 func TestSettlementCompensation_CapRelist(t *testing.T) {
-	t.Parallel()
-
 	const shortPaymentTerm = 2 * time.Second
 
-	db := getCompDB(t)
-	_, c := buildApp(t, db, billingadapters.PSPModeSuccess, shortPaymentTerm)
+	_, c := buildApp(t, billingadapters.PSPModeSuccess, shortPaymentTerm)
 
 	// --- participants --------------------------------------------------------
 	sellerID := uuid.New()
@@ -223,18 +235,21 @@ func TestSettlementCompensation_CapRelist(t *testing.T) {
 	}, sellerToken)
 
 	// Single bidder only → no runner-up qualifies (runnerUpBid.IsZero()).
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, winnerToken)
 
+	// Poll variants only inside Eventually: require.* in the condition
+	// goroutine Goexits it and freezes Eventually (see tests/client.go).
 	assert.Eventually(t, func() bool {
-		return c.AuctionCard(t, auctionID, winnerToken).Status == "closed"
+		card, ok := c.AuctionCardPoll(t, auctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond, "auction not closed")
 
 	// Winner does not pay; invoice expires → no runner-up → Relist (gen=0).
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "relisted"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && s.State == "relisted"
 	}, 20*time.Second, 200*time.Millisecond, "saga did not reach relisted (gen 0)")
 
 	s := c.GetSettlementStatus(t, auctionID, opsToken)
@@ -244,7 +259,10 @@ func TestSettlementCompensation_CapRelist(t *testing.T) {
 	// --- find the relisted auction in the dashboard --------------------------
 	var newAuctionID uuid.UUID
 	assert.Eventually(t, func() bool {
-		dash := c.SellerDashboard(t, sellerID, sellerToken)
+		dash, ok := c.SellerDashboardPoll(t, sellerID, sellerToken)
+		if !ok {
+			return false
+		}
 		for _, item := range dash.Items {
 			if item.AuctionID != auctionID && item.Status == "listed" {
 				newAuctionID = item.AuctionID
@@ -257,26 +275,29 @@ func TestSettlementCompensation_CapRelist(t *testing.T) {
 	require.NotEqual(t, uuid.Nil, newAuctionID)
 
 	// Bid on the relisted auction so it closes as Sold (needed for a settlement).
+	// The bidding window opens at startsAt = relist time + RelistDelay, so wait
+	// for the window, not just for the row to appear (the card projection for
+	// the relisted auction may not exist yet — poll tolerates the 404).
 	assert.Eventually(t, func() bool {
-		card := c.AuctionCard(t, newAuctionID, winnerToken)
-		return card.Status == "listed"
-	}, 10*time.Second, 200*time.Millisecond, "relisted auction not listed yet")
+		card, ok := c.AuctionCardPoll(t, newAuctionID, winnerToken)
+		return ok && card.Status == "listed" && !card.StartsAt.After(time.Now().UTC())
+	}, 10*time.Second, 200*time.Millisecond, "relisted auction not open for bidding yet")
 
 	c.PlaceBid(t, newAuctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, winnerToken)
 
-	// Wait for the relisted auction to close. RelistDuration=30s by default;
-	// the closing worker will close it after the window expires.
+	// Wait for the relisted auction to close. RelistDuration=6s in the component
+	// config; the closing worker closes it after the window expires.
 	assert.Eventually(t, func() bool {
-		card := c.AuctionCard(t, newAuctionID, winnerToken)
-		return card.Status == "closed"
+		card, ok := c.AuctionCardPoll(t, newAuctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 45*time.Second, 500*time.Millisecond, "relisted auction not closed within 45 s")
 
 	// Winner does not pay again → invoice expires → relistGen==1 → FailedUnsold.
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, newAuctionID, opsToken)
-		return s.State == "failed_unsold"
+		s, ok := c.SettlementStatusPoll(t, newAuctionID, opsToken)
+		return ok && s.State == "failed_unsold"
 	}, 20*time.Second, 200*time.Millisecond,
 		"relisted auction saga did not reach failed_unsold (cap-relist)")
 

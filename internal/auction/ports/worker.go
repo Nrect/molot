@@ -5,6 +5,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"molot/internal/auction/app/command"
 	"molot/internal/auction/domain/auction"
 	"molot/internal/common/decorator"
@@ -34,6 +39,10 @@ type ClosingWorker struct {
 	clock        workerClock
 	interval     time.Duration
 	logger       *slog.Logger
+
+	tracer       trace.Tracer
+	tickDuration metric.Float64Histogram
+	dueBacklog   metric.Int64Gauge
 }
 
 func NewClosingWorker(
@@ -42,6 +51,8 @@ func NewClosingWorker(
 	clock workerClock,
 	interval time.Duration,
 	logger *slog.Logger,
+	tracerProvider trace.TracerProvider,
+	meterProvider metric.MeterProvider,
 ) *ClosingWorker {
 	if closeAuction == nil {
 		panic("NewClosingWorker: nil close handler")
@@ -58,12 +69,34 @@ func NewClosingWorker(
 	if logger == nil {
 		panic("NewClosingWorker: nil logger")
 	}
+	if tracerProvider == nil {
+		panic("NewClosingWorker: nil tracer provider")
+	}
+	if meterProvider == nil {
+		panic("NewClosingWorker: nil meter provider")
+	}
+
+	meter := meterProvider.Meter("molot/internal/auction/ports")
+	tickDuration, err := meter.Float64Histogram("molot_worker_tick_duration",
+		metric.WithDescription("Duration of one worker tick"), metric.WithUnit("s"))
+	if err != nil {
+		panic("NewClosingWorker: create tick duration histogram: " + err.Error())
+	}
+	dueBacklog, err := meter.Int64Gauge("molot_worker_due_backlog",
+		metric.WithDescription("Due candidates found by the last tick"))
+	if err != nil {
+		panic("NewClosingWorker: create due backlog gauge: " + err.Error())
+	}
+
 	return &ClosingWorker{
 		closeAuction: closeAuction,
 		scanner:      scanner,
 		clock:        clock,
 		interval:     interval,
 		logger:       logger,
+		tracer:       tracerProvider.Tracer("molot/internal/auction/ports"),
+		tickDuration: tickDuration,
+		dueBacklog:   dueBacklog,
 	}
 }
 
@@ -84,11 +117,25 @@ func (w *ClosingWorker) Run(ctx context.Context) error {
 }
 
 func (w *ClosingWorker) tick(ctx context.Context) {
+	ctx, span := w.tracer.Start(ctx, "worker/closing.tick")
+	defer span.End()
+
+	workerAttr := metric.WithAttributes(attribute.String("worker", "closing"))
+	start := time.Now()
+	defer func() {
+		w.tickDuration.Record(ctx, time.Since(start).Seconds(), workerAttr)
+	}()
+
 	ids, err := w.scanner.DueForClosing(ctx, w.clock.Now(), closingCandidateLimit)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		w.logger.ErrorContext(ctx, "closing worker scan failed", slog.Any("error", err))
 		return
 	}
+	span.SetStatus(codes.Ok, "")
+	w.dueBacklog.Record(ctx, int64(len(ids)), workerAttr)
+
 	for _, id := range ids {
 		if err := w.closeAuction.Handle(ctx, command.CloseAuction{AuctionID: id}); err != nil {
 			// Benign outcomes (already closed / extended / cancelled)

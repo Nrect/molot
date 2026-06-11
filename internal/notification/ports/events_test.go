@@ -544,6 +544,7 @@ func TestOnParticipantVerified_IsNoOp(t *testing.T) {
 	event := &participantevents.ParticipantVerifiedV1{EventID: "evt-ver-1", ParticipantID: "bob"}
 
 	require.NoError(t, f.handle(t, "OnParticipantVerified", event))
+	require.NoError(t, f.handle(t, "OnParticipantVerified", event)) // at-least-once redelivery
 	assert.Empty(t, f.emails.emails())
 	assert.Empty(t, f.recipients.rows, "the V1 payload carries no address data to project")
 }

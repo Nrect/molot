@@ -1,4 +1,6 @@
-# CI merge gate: lint + build + unit (-race) + integration (real Postgres) + docker image build.
+# CI merge gate: lint + build + unit (-race) + integration (real Postgres)
+# + component (whole app against compose Postgres) + e2e (production
+# binaries from docker compose, public HTTP) + docker image build.
 # All test levels gate the merge (BOOK_AUDIT rule 46).
 name: ci
 
@@ -62,6 +64,30 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -tags integration ./... -count=1
+
+  # Component level runs through the make target (single source of truth,
+  # rule 39) and against compose Postgres rather than a service container:
+  # the suite assembles several app instances, each with its own pool, and
+  # needs the max_connections=300 set in docker-compose.yml.
+  component:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-component
+
+  # E2E level: docker compose up -d --build --wait + one critical-path run
+  # over public HTTP, all encoded in the make target (rule 39).
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-e2e
 
   docker:
     runs-on: ubuntu-latest

@@ -50,11 +50,14 @@ type Application struct {
 	HTTPHandler http.Handler
 
 	// RunWorkers starts the watermill router, the auction-closing worker
-	// and the invoice-expiry worker. In component tests the HTTP server is
-	// replaced by httptest.NewServer; RunWorkers does not start the HTTP
-	// server regardless of startHTTP (the variant used in prod is assembled
-	// by NewApplication which adds its own HTTP goroutine).
+	// and the invoice-expiry worker. The HTTP server is the caller's
+	// concern: cmd/monolith serves HTTPHandler itself, component tests
+	// use httptest.NewServer.
 	RunWorkers func(ctx context.Context) error
+
+	// BusRunning is closed once the watermill router consumes; the prod
+	// entry gates its HTTP listener on it so readiness cannot flap.
+	BusRunning <-chan struct{}
 
 	// Context-service accessors for component-test introspection.
 	AuctionSvc     *auctionservice.Service
@@ -135,10 +138,11 @@ func NewComponentTestApplication(
 		SnipeMaxExtensions:    3,
 		PaymentTerm:           paymentTerm,
 		PSPMode:               config.PSPMode(pspMode),
-		RelistDelay:           0,
-		RelistDuration:        30 * time.Second,
+		RelistDelay:           time.Second,
+		RelistDuration:        6 * time.Second,
 		ClosingPollInterval:   200 * time.Millisecond,
 		ExpiryPollInterval:    200 * time.Millisecond,
+		BusPollInterval:       50 * time.Millisecond,
 		HTTPPort:              0,
 		DatabaseURL:           "",
 		AuthMode:              config.AuthModeLocalHS256,
@@ -181,13 +185,13 @@ func newApplication(
 		return nil, fmt.Errorf("create dead letter publisher: %w", err)
 	}
 
-	wmRouter, err := cwatermill.NewRouter(wmLogger, deadLetterPublisher)
+	wmRouter, err := cwatermill.NewRouter(wmLogger, deadLetterPublisher, meterProvider)
 	if err != nil {
 		return nil, fmt.Errorf("create watermill router: %w", err)
 	}
 
 	subscriberConstructor := func(handlerName string) (message.Subscriber, error) {
-		return cwatermill.NewSQLSubscriber(db, handlerName, wmLogger)
+		return cwatermill.NewSQLSubscriber(db, handlerName, cfg.BusPollInterval, wmLogger)
 	}
 
 	if err := cwatermill.RegisterBusMetrics(db, meterProvider); err != nil {
@@ -294,6 +298,7 @@ func newApplication(
 	return &Application{
 		HTTPHandler:    rootRouter,
 		RunWorkers:     runWorkers,
+		BusRunning:     wmRouter.Running(),
 		AuctionSvc:     auctionSvc,
 		ParticipantSvc: participantSvc,
 		BillingSvc:     billingSvc,

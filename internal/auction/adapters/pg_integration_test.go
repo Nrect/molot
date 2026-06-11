@@ -64,7 +64,7 @@ func pgTestDB(t *testing.T) *sql.DB {
 		// Initialize the outbox topic schema (in production the
 		// service constructor does it).
 		wmLogger := cwatermill.NewLogger(logs.NewLogger("text"))
-		subscriber, err := cwatermill.NewSQLSubscriber(pgDB, "adapters-test-init", wmLogger)
+		subscriber, err := cwatermill.NewSQLSubscriber(pgDB, "adapters-test-init", 100*time.Millisecond, wmLogger)
 		if err != nil {
 			pgErr = err
 			return

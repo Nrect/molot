@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	wm "github.com/ThreeDotsLabs/watermill"
 	"github.com/pressly/goose/v3"
@@ -58,7 +59,7 @@ func pgTestDB(t *testing.T) *sql.DB {
 		// The tx publisher never auto-creates topic schema (it would
 		// implicitly commit the business transaction); in production
 		// subscribers initialize it at startup — mirror that here.
-		subscriber, err := cwatermill.NewSQLSubscriber(pgDB, "billing-adapter-tests", wm.NopLogger{})
+		subscriber, err := cwatermill.NewSQLSubscriber(pgDB, "billing-adapter-tests", 100*time.Millisecond, wm.NopLogger{})
 		if err != nil {
 			pgErr = err
 			return

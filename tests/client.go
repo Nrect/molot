@@ -1,6 +1,6 @@
-//go:build component
+//go:build component || e2e
 
-// Package tests provides HTTP client helpers for component tests
+// Package tests provides HTTP client helpers for component and e2e tests
 // (BOOK_AUDIT rule 44: codegen clients wrapped in *testing.T helpers).
 //
 // The approach: thin hand-written HTTP helpers rather than a generated
@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"molot/internal/common/auth"
@@ -98,14 +99,6 @@ func (c *Client) do(t *testing.T, method, path string, body any, token string) *
 	return resp
 }
 
-func decodeJSON(t *testing.T, resp *http.Response, dst any) {
-	t.Helper()
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	require.NoError(t, err, "read response body")
-	require.NoError(t, json.Unmarshal(b, dst), "decode JSON: %s", string(b))
-}
-
 func slugFrom(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	defer resp.Body.Close()
@@ -115,6 +108,92 @@ func slugFrom(t *testing.T, resp *http.Response) string {
 	b, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(b, &e)
 	return e.Slug
+}
+
+// requireStatusAndDecode reads the body once, asserts the expected status
+// (reporting the raw body on mismatch), then decodes the payload into dst.
+// Reading before asserting matters: testify evaluates message args eagerly,
+// so slugFrom(t, resp) inside the assertion call would close the body even
+// when the assertion passes, breaking the subsequent decode.
+func requireStatusAndDecode(t *testing.T, resp *http.Response, want int, name string, dst any) {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "%s: read response body", name)
+	require.Equal(t, want, resp.StatusCode, "%s: body=%s", name, string(b))
+	require.NoError(t, json.Unmarshal(b, dst), "%s: decode JSON: %s", name, string(b))
+}
+
+// --- eventually-poll helpers -------------------------------------------------
+//
+// testify's assert.Eventually runs its condition in a SEPARATE goroutine
+// (go checkCond()). require.* calls t.FailNow(), which is runtime.Goexit() —
+// it kills that goroutine before it sends its result, so Eventually never
+// re-arms its ticker and silently blocks until the whole waitFor budget
+// expires ("Condition never satisfied"), even when the system reached the
+// desired state milliseconds later.
+//
+// Polls against read models and the saga are EXPECTED to see transient
+// 404s while projections/saga handlers converge (eventual consistency), so
+// Eventually conditions must treat a non-200 as "not yet", never as fatal.
+// Use the *Poll helpers below inside assert.Eventually conditions and keep
+// the require-based accessors for direct, post-convergence assertions.
+
+// pollJSON performs a GET and decodes the body into dst on 200, returning
+// true. A non-200 returns false without failing the test (the read model
+// has not converged yet). Transport/decode errors are reported non-fatally
+// (assert, not require) so the surrounding assert.Eventually keeps control
+// of its condition goroutine.
+func (c *Client) pollJSON(t *testing.T, path, token string, dst any) bool {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, c.BaseURL+path, nil)
+	if !assert.NoError(t, err, "pollJSON: build request %s", path) {
+		return false
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if !assert.NoError(t, err, "pollJSON: execute GET %s", path) {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false // not converged yet — let Eventually retry
+	}
+	b, err := io.ReadAll(resp.Body)
+	if !assert.NoError(t, err, "pollJSON: read body %s", path) {
+		return false
+	}
+	return assert.NoError(t, json.Unmarshal(b, dst),
+		"pollJSON: decode %s: %s", path, string(b))
+}
+
+// AuctionCardPoll is the non-fatal AuctionCard variant for Eventually
+// conditions: ok=false while the card projection has no row yet.
+func (c *Client) AuctionCardPoll(t *testing.T, auctionID uuid.UUID, token string) (AuctionCardResponse, bool) {
+	t.Helper()
+	var card AuctionCardResponse
+	ok := c.pollJSON(t, fmt.Sprintf("/api/auctions/%s", auctionID), token, &card)
+	return card, ok
+}
+
+// SettlementStatusPoll is the non-fatal GetSettlementStatus variant for
+// Eventually conditions: ok=false while the saga has not started yet.
+func (c *Client) SettlementStatusPoll(t *testing.T, auctionID uuid.UUID, opsToken string) (SettlementResponse, bool) {
+	t.Helper()
+	var s SettlementResponse
+	ok := c.pollJSON(t, fmt.Sprintf("/api/auctions/%s/settlement", auctionID), opsToken, &s)
+	return s, ok
+}
+
+// SellerDashboardPoll is the non-fatal SellerDashboard variant for
+// Eventually conditions.
+func (c *Client) SellerDashboardPoll(t *testing.T, sellerID uuid.UUID, sellerToken string) (DashboardResponse, bool) {
+	t.Helper()
+	var dash DashboardResponse
+	ok := c.pollJSON(t, fmt.Sprintf("/api/sellers/%s/dashboard", sellerID), sellerToken, &dash)
+	return dash, ok
 }
 
 // --- participant endpoints -------------------------------------------------
@@ -155,15 +234,15 @@ func (c *Client) VerifyParticipant(t *testing.T, participantID uuid.UUID, opsTok
 
 // ListAuctionRequest mirrors the OpenAPI schema.
 type ListAuctionRequest struct {
-	ID                uuid.UUID  `json:"id"`
-	Title             string     `json:"title"`
-	Description       *string    `json:"description,omitempty"`
-	StartPriceMinor   int64      `json:"startPriceMinor"`
-	IncrementMinor    int64      `json:"incrementMinor"`
-	ReservePriceMinor *int64     `json:"reservePriceMinor,omitempty"`
-	Currency          string     `json:"currency"`
-	StartsAt          time.Time  `json:"startsAt"`
-	EndsAt            time.Time  `json:"endsAt"`
+	ID                uuid.UUID `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	StartPriceMinor   int64     `json:"startPriceMinor"`
+	IncrementMinor    int64     `json:"incrementMinor"`
+	ReservePriceMinor *int64    `json:"reservePriceMinor,omitempty"`
+	Currency          string    `json:"currency"`
+	StartsAt          time.Time `json:"startsAt"`
+	EndsAt            time.Time `json:"endsAt"`
 }
 
 // ListAuction creates an auction. Asserts 204.
@@ -200,10 +279,8 @@ func (c *Client) AuctionCard(t *testing.T, auctionID uuid.UUID, token string) Au
 	t.Helper()
 	resp := c.do(t, http.MethodGet,
 		fmt.Sprintf("/api/auctions/%s", auctionID), nil, token)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"AuctionCard slug=%s", slugFrom(t, resp))
 	var card AuctionCardResponse
-	decodeJSON(t, resp, &card)
+	requireStatusAndDecode(t, resp, http.StatusOK, "AuctionCard", &card)
 	return card
 }
 
@@ -233,6 +310,31 @@ func (c *Client) PlaceBidExpect(t *testing.T, auctionID uuid.UUID, req PlaceBidR
 	return resp.StatusCode
 }
 
+// PlaceBidEventually places a bid, retrying while the bidder-profile
+// projection has not caught up with a just-issued verification
+// (403 verification-required). The auction context learns about verification
+// asynchronously via ParticipantVerifiedV1, so the first qualifying bid after
+// VerifyParticipant legitimately races the projection — a real client would
+// retry exactly like this. Any other failure fails the test immediately.
+func (c *Client) PlaceBidEventually(t *testing.T, auctionID uuid.UUID, req PlaceBidRequest, bidderToken string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp := c.do(t, http.MethodPost,
+			fmt.Sprintf("/api/auctions/%s/bids", auctionID), req, bidderToken)
+		status := resp.StatusCode
+		slug := slugFrom(t, resp) // closes body
+		if status == http.StatusNoContent {
+			return
+		}
+		if !(status == http.StatusForbidden && slug == "verification-required") || time.Now().After(deadline) {
+			require.Equal(t, http.StatusNoContent, status, "PlaceBid slug=%s", slug)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // --- seller dashboard ------------------------------------------------------
 
 // DashboardItem mirrors the OpenAPI schema.
@@ -260,10 +362,8 @@ func (c *Client) SellerDashboard(t *testing.T, sellerID uuid.UUID, sellerToken s
 	t.Helper()
 	resp := c.do(t, http.MethodGet,
 		fmt.Sprintf("/api/sellers/%s/dashboard", sellerID), nil, sellerToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"SellerDashboard slug=%s", slugFrom(t, resp))
 	var dash DashboardResponse
-	decodeJSON(t, resp, &dash)
+	requireStatusAndDecode(t, resp, http.StatusOK, "SellerDashboard", &dash)
 	return dash
 }
 
@@ -287,10 +387,8 @@ func (c *Client) GetInvoice(t *testing.T, invoiceID uuid.UUID, bidderToken strin
 	t.Helper()
 	resp := c.do(t, http.MethodGet,
 		fmt.Sprintf("/api/invoices/%s", invoiceID), nil, bidderToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"GetInvoice slug=%s", slugFrom(t, resp))
 	var inv InvoiceResponse
-	decodeJSON(t, resp, &inv)
+	requireStatusAndDecode(t, resp, http.StatusOK, "GetInvoice", &inv)
 	return inv
 }
 
@@ -314,10 +412,8 @@ func (c *Client) GetPendingInvoices(t *testing.T, bidderID uuid.UUID, bidderToke
 	resp := c.do(t, http.MethodGet,
 		fmt.Sprintf("/api/bidders/%s/invoices?status=pending", bidderID),
 		nil, bidderToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"GetPendingInvoices slug=%s", slugFrom(t, resp))
 	var result PendingInvoicesResponse
-	decodeJSON(t, resp, &result)
+	requireStatusAndDecode(t, resp, http.StatusOK, "GetPendingInvoices", &result)
 	return result.Invoices
 }
 
@@ -344,18 +440,18 @@ func (c *Client) PayInvoiceExpect(t *testing.T, invoiceID uuid.UUID, bidderToken
 
 // SettlementResponse mirrors the OpenAPI schema.
 type SettlementResponse struct {
-	AuctionID        uuid.UUID  `json:"auctionId"`
-	State            string     `json:"state"`
-	WinnerID         uuid.UUID  `json:"winnerId"`
-	HammerMinor      int64      `json:"hammerMinor"`
-	Currency         string     `json:"currency"`
-	RunnerUpID       *uuid.UUID `json:"runnerUpId,omitempty"`
-	RunnerUpMinor    *int64     `json:"runnerUpMinor,omitempty"`
-	RunnerUpQualifies bool      `json:"runnerUpQualifies"`
-	RelistGeneration int        `json:"relistGeneration"`
-	Attempt          int        `json:"attempt"`
-	InvoiceID        *uuid.UUID `json:"invoiceId,omitempty"`
-	FailureReason    *string    `json:"failureReason,omitempty"`
+	AuctionID         uuid.UUID  `json:"auctionId"`
+	State             string     `json:"state"`
+	WinnerID          uuid.UUID  `json:"winnerId"`
+	HammerMinor       int64      `json:"hammerMinor"`
+	Currency          string     `json:"currency"`
+	RunnerUpID        *uuid.UUID `json:"runnerUpId,omitempty"`
+	RunnerUpMinor     *int64     `json:"runnerUpMinor,omitempty"`
+	RunnerUpQualifies bool       `json:"runnerUpQualifies"`
+	RelistGeneration  int        `json:"relistGeneration"`
+	Attempt           int        `json:"attempt"`
+	InvoiceID         *uuid.UUID `json:"invoiceId,omitempty"`
+	FailureReason     *string    `json:"failureReason,omitempty"`
 }
 
 // GetSettlementStatus fetches the settlement saga status (ops token). Asserts 200.
@@ -363,10 +459,8 @@ func (c *Client) GetSettlementStatus(t *testing.T, auctionID uuid.UUID, opsToken
 	t.Helper()
 	resp := c.do(t, http.MethodGet,
 		fmt.Sprintf("/api/auctions/%s/settlement", auctionID), nil, opsToken)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"GetSettlementStatus slug=%s", slugFrom(t, resp))
 	var s SettlementResponse
-	decodeJSON(t, resp, &s)
+	requireStatusAndDecode(t, resp, http.StatusOK, "GetSettlementStatus", &s)
 	return s
 }
 

@@ -8,6 +8,7 @@ package watermill
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	wm "github.com/ThreeDotsLabs/watermill"
 	wmsql "github.com/ThreeDotsLabs/watermill-sql/v4/pkg/sql"
@@ -21,7 +22,12 @@ import (
 // Consumer groups track offsets independently, so each event handler
 // (group = handler name, see NewEventProcessor) receives every message.
 // The first subscription initializes the watermill tables.
-func NewSQLSubscriber(db *sql.DB, consumerGroup string, logger wm.LoggerAdapter) (message.Subscriber, error) {
+//
+// pollInterval is the idle wait between SELECTs when no messages are
+// pending (BUS_POLL_INTERVAL). It bounds end-to-end event latency per
+// hop, so chained flows (participant → auction projection → saga) feel
+// it multiplied; the library default of 1s is too sluggish for that.
+func NewSQLSubscriber(db *sql.DB, consumerGroup string, pollInterval time.Duration, logger wm.LoggerAdapter) (message.Subscriber, error) {
 	subscriber, err := wmsql.NewSubscriber(
 		wmsql.BeginnerFromStdSQL(db),
 		wmsql.SubscriberConfig{
@@ -29,6 +35,7 @@ func NewSQLSubscriber(db *sql.DB, consumerGroup string, logger wm.LoggerAdapter)
 			SchemaAdapter:    wmsql.DefaultPostgreSQLSchema{},
 			OffsetsAdapter:   wmsql.DefaultPostgreSQLOffsetsAdapter{},
 			InitializeSchema: true,
+			PollInterval:     pollInterval,
 		},
 		logger,
 	)

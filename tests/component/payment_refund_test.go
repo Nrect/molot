@@ -34,10 +34,7 @@ import (
 // TestPaymentRefund_Flaky: PSP_MODE=flaky — first Charge fails with 502,
 // retry succeeds (idempotency key prevents double debit).
 func TestPaymentRefund_Flaky(t *testing.T) {
-	t.Parallel()
-
-	db := getCompDB(t)
-	_, c := buildApp(t, db, billingadapters.PSPModeFlaky, 30*time.Second)
+	_, c := buildApp(t, billingadapters.PSPModeFlaky, 30*time.Second)
 
 	// --- participants --------------------------------------------------------
 	sellerID := uuid.New()
@@ -62,19 +59,22 @@ func TestPaymentRefund_Flaky(t *testing.T) {
 		StartsAt: now.Add(-time.Second), EndsAt: now.Add(3 * time.Second),
 	}, sellerToken)
 
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, winnerToken)
 
+	// Poll variants only inside Eventually: require.* in the condition
+	// goroutine Goexits it and freezes Eventually (see tests/client.go).
 	assert.Eventually(t, func() bool {
-		return c.AuctionCard(t, auctionID, winnerToken).Status == "closed"
+		card, ok := c.AuctionCardPoll(t, auctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond, "auction not closed")
 
 	// Wait for invoice.
 	var invoiceID uuid.UUID
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		if s.State == "awaiting_payment" && s.InvoiceID != nil {
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		if ok && s.State == "awaiting_payment" && s.InvoiceID != nil {
 			invoiceID = *s.InvoiceID
 			return true
 		}
@@ -91,8 +91,8 @@ func TestPaymentRefund_Flaky(t *testing.T) {
 
 	// --- saga settles --------------------------------------------------------
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "settled"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && s.State == "settled"
 	}, 10*time.Second, 200*time.Millisecond, "saga did not settle after flaky retry")
 
 	inv := c.GetInvoice(t, invoiceID, winnerToken)
@@ -106,12 +106,9 @@ func TestPaymentRefund_Flaky(t *testing.T) {
 // We use a very short PAYMENT_TERM (2 s) to make the expiry race realistic
 // without long sleeps.
 func TestPaymentRefund_ExpiredRace(t *testing.T) {
-	t.Parallel()
-
 	const shortTerm = 2 * time.Second
 
-	db := getCompDB(t)
-	_, c := buildApp(t, db, billingadapters.PSPModeSuccess, shortTerm)
+	_, c := buildApp(t, billingadapters.PSPModeSuccess, shortTerm)
 
 	// --- participants --------------------------------------------------------
 	sellerID := uuid.New()
@@ -136,18 +133,19 @@ func TestPaymentRefund_ExpiredRace(t *testing.T) {
 		StartsAt: now.Add(-time.Second), EndsAt: now.Add(3 * time.Second),
 	}, sellerToken)
 
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, winnerToken)
 
 	assert.Eventually(t, func() bool {
-		return c.AuctionCard(t, auctionID, winnerToken).Status == "closed"
+		card, ok := c.AuctionCardPoll(t, auctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond, "auction not closed")
 
 	var invoiceID uuid.UUID
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		if s.State == "awaiting_payment" && s.InvoiceID != nil {
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		if ok && s.State == "awaiting_payment" && s.InvoiceID != nil {
 			invoiceID = *s.InvoiceID
 			return true
 		}
@@ -187,8 +185,8 @@ func TestPaymentRefund_ExpiredRace(t *testing.T) {
 	// The saga must reach a terminal state regardless of which path won.
 	// If paid: Settled; if expired (no runner-up, relistGen=0): Relisted.
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "settled" || s.State == "relisted" || s.State == "failed_unsold"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && (s.State == "settled" || s.State == "relisted" || s.State == "failed_unsold")
 	}, 20*time.Second, 200*time.Millisecond,
 		"saga did not reach a terminal state after payment race")
 }

@@ -1,7 +1,8 @@
-// Bus health gauges of the observability map (§11): dead-letter size
-// and per-topic consumer lag, both computed by scanning the watermill
-// tables. They are observable gauges — the scan runs on every metric
-// collection (the periodic reader interval), no extra goroutine.
+// Bus observability metrics (§11): the retry counter registered inside
+// NewRouter, plus the observable gauges registered here — dead-letter
+// size and per-topic consumer lag, both computed by scanning the
+// watermill tables on every metric collection (periodic reader
+// interval), no extra goroutine.
 package watermill
 
 import (

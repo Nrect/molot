@@ -63,6 +63,7 @@ type Config struct {
 
 	ClosingPollInterval time.Duration // CLOSING_POLL_INTERVAL (default 1s)
 	ExpiryPollInterval  time.Duration // EXPIRY_POLL_INTERVAL (default 5s)
+	BusPollInterval     time.Duration // BUS_POLL_INTERVAL (default 100ms): idle wait of SQL subscribers; bounds per-hop event latency
 
 	HTTPPort    int    // HTTP_PORT (default 8080)
 	DatabaseURL string // DATABASE_URL (required)
@@ -97,6 +98,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		RelistDuration:           l.duration("RELIST_DURATION", 24*time.Hour),
 		ClosingPollInterval:      l.duration("CLOSING_POLL_INTERVAL", time.Second),
 		ExpiryPollInterval:       l.duration("EXPIRY_POLL_INTERVAL", 5*time.Second),
+		BusPollInterval:          l.duration("BUS_POLL_INTERVAL", 100*time.Millisecond),
 		HTTPPort:                 l.port("HTTP_PORT", 8080),
 		DatabaseURL:              l.required("DATABASE_URL"),
 		OTELExporterOTLPEndpoint: l.optional("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),

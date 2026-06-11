@@ -11,7 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/metric/noop"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"molot/internal/billing/app/command"
 	"molot/internal/billing/domain/invoice"
@@ -74,7 +75,7 @@ func TestExpiryWorkerExpiresDueInvoices(t *testing.T) {
 	}
 	worker := ports.NewExpiryWorker(
 		due, spy, time.Millisecond, stubClock{},
-		slog.New(slog.DiscardHandler), noop.NewMeterProvider(),
+		slog.New(slog.DiscardHandler), metricnoop.NewMeterProvider(), tracenoop.NewTracerProvider(),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

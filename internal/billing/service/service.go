@@ -83,9 +83,13 @@ func NewService(deps Deps) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("billing: payment term: %w", err)
 	}
-	psp, err := adapters.NewFakePSP(deps.PSPMode)
+	rawPSP, err := adapters.NewFakePSP(deps.PSPMode)
 	if err != nil {
 		return nil, fmt.Errorf("billing: %w", err)
+	}
+	psp, err := adapters.NewInstrumentedPSP(rawPSP, deps.MeterProvider, deps.TracerProvider)
+	if err != nil {
+		return nil, fmt.Errorf("billing: instrumented psp: %w", err)
 	}
 	if deps.ExpiryPollInterval <= 0 {
 		return nil, fmt.Errorf("billing: expiry poll interval must be positive, got %s", deps.ExpiryPollInterval)
@@ -120,7 +124,7 @@ func NewService(deps Deps) (*Service, error) {
 
 	worker := ports.NewExpiryWorker(
 		repo, application.Commands.ExpireInvoice,
-		deps.ExpiryPollInterval, clk, deps.Logger, deps.MeterProvider,
+		deps.ExpiryPollInterval, clk, deps.Logger, deps.MeterProvider, deps.TracerProvider,
 	)
 
 	return &Service{

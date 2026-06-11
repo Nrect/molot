@@ -5,6 +5,10 @@
 services:
   postgres:
     image: postgres:16.9-alpine
+    # Dev/test stack: component tests assemble several isolated app
+    # instances, each with its own connection pool — the default 100
+    # connections is not enough.
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: molot
       POSTGRES_PASSWORD: molot
@@ -25,6 +29,14 @@ services:
       dockerfile: build/Dockerfile
     env_file:
       - .env.example
+    environment:
+      # Anti-snipe knobs are interpolated so `make test-e2e` can shrink
+      # them: with the production-like 5m policy every bid on a
+      # seconds-long e2e lot would extend the deadline by minutes. The
+      # defaults mirror .env.example, so a plain `docker compose up`
+      # behaves exactly as before.
+      SNIPE_WINDOW: ${SNIPE_WINDOW:-5m}
+      SNIPE_EXTENSION: ${SNIPE_EXTENSION:-5m}
     ports:
       - "8080:8080"
     depends_on:

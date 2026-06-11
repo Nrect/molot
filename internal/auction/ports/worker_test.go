@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"molot/internal/auction/app/command"
 	"molot/internal/auction/domain/auction"
@@ -52,7 +54,8 @@ func TestClosingWorker_ClosesScannedCandidates(t *testing.T) {
 	scanner := &stubScanner{ids: []auction.AuctionID{id}}
 	clock := stubClock{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 
-	worker := ports.NewClosingWorker(handler, scanner, clock, time.Millisecond, slog.Default())
+	worker := ports.NewClosingWorker(handler, scanner, clock, time.Millisecond, slog.Default(),
+		tracenoop.NewTracerProvider(), metricnoop.NewMeterProvider())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

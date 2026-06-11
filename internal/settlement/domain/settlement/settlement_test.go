@@ -364,6 +364,57 @@ func TestDecidePhase(t *testing.T) {
 		assert.ErrorIs(t, err, settlement.ErrUnexpectedTransition)
 	})
 
+	t.Run("payment received (InvoicePaidV1 fast-forward seam)", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			saga    func(t *testing.T) *settlement.Settlement
+			inv     func(s *settlement.Settlement) settlement.InvoiceID
+			wantErr error
+		}{
+			{
+				// §6.3: started + own invoice → fast-forward seam (nil).
+				name:    "started saga with own invoice fast-forwards to nil",
+				saga:    func(t *testing.T) *settlement.Settlement { return startedSaga(t, closingOpts{}) },
+				inv:     func(s *settlement.Settlement) settlement.InvoiceID { return s.InvoiceID() },
+				wantErr: nil,
+			},
+			{
+				// awaiting + own invoice → normal settlement path (nil).
+				name:    "awaiting saga with own invoice returns nil",
+				saga:    func(t *testing.T) *settlement.Settlement { return awaitingSaga(t, closingOpts{}) },
+				inv:     func(s *settlement.Settlement) settlement.InvoiceID { return s.InvoiceID() },
+				wantErr: nil,
+			},
+			{
+				// awaiting + foreign invoice → at-least-once duplicate (ack).
+				name:    "awaiting saga with foreign invoice returns ErrUnexpectedTransition",
+				saga:    func(t *testing.T) *settlement.Settlement { return awaitingSaga(t, closingOpts{}) },
+				inv:     func(_ *settlement.Settlement) settlement.InvoiceID { return newInvoiceID(t) },
+				wantErr: settlement.ErrUnexpectedTransition,
+			},
+			{
+				// terminal state → at-least-once duplicate (ack).
+				name:    "settled saga with own invoice returns ErrUnexpectedTransition",
+				saga:    func(t *testing.T) *settlement.Settlement { return settledSaga(t, closingOpts{}) },
+				inv:     func(s *settlement.Settlement) settlement.InvoiceID { return s.InvoiceID() },
+				wantErr: settlement.ErrUnexpectedTransition,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				s := tc.saga(t)
+				err := s.DecideOnPaymentReceived(tc.inv(s))
+				if tc.wantErr != nil {
+					assert.ErrorIs(t, err, tc.wantErr)
+				} else {
+					assert.NoError(t, err)
+				}
+			})
+		}
+	})
+
 	t.Run("winner reassigned is admitted while awaiting or awarding", func(t *testing.T) {
 		t.Parallel()
 		awaiting := awaitingSaga(t, closingOpts{qualifies: true})

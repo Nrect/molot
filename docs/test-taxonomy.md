@@ -14,6 +14,8 @@
 
 **Unit (domain)** — corner cases агрегатов: black-box (`package auction_test`), table-driven, snake_case-имена кейсов, фикстуры только через доменный API, `go-cmp` + `cmp.AllowUnexported`, sentinel-ошибки ассертятся `errors.Is`. Тесты-зеркала чистых функций не пишем.
 
+> **Deliberate deviation from rule 40 (go-cmp + AllowUnexported).** All domain value objects in this project are single-field comparable wrappers (e.g. `AuctionID`, `InvoiceID`, `Money`), so testify's deep-equality assertions (`assert.Equal`, `assert.ErrorIs`) are sufficient and clearer than `go-cmp` with an `AllowUnexported` option list. If a multi-field, non-comparable struct is ever added to the domain, switch those comparisons to `go-cmp + cmp.AllowUnexported` as rule 40 requires.
+
 **Unit (app)** — только реальная оркестрация (порядок вызовов, прокидывание значений, маппинг sentinel → no-op). Моки — рукописные recording spies. «Метод был вызван» сам по себе — не ассерт. Бизнес-сценарий в app-тесте = логика утекла из домена → перенести.
 
 **Integration** — «правильно ли МЫ используем Postgres»: один shared black-box suite на pg+inmem реализации каждого repo; `t.Parallel()` везде; изоляция уникальными данными (uuid), cleanup запрещён; ассерты по конкретному ID, не по длине коллекции; sleep/retries запрещены (`assert.Eventually` — крайний случай для проекций). Обязательные: rollback-тест (updateFn мутирует и возвращает ошибку → старое состояние живо) и race-тесты (`close(start)`, ровно один победитель). Гейт: пропускаются без `TEST_DATABASE_URL`.

@@ -160,7 +160,8 @@ func newService(
 	if interval <= 0 {
 		interval = time.Second
 	}
-	worker := ports.NewClosingWorker(application.Commands.CloseAuction, scanner, clk, interval, deps.Logger)
+	worker := ports.NewClosingWorker(application.Commands.CloseAuction, scanner, clk, interval, deps.Logger,
+		deps.TracerProvider, deps.MeterProvider)
 
 	return &Service{
 		app: application,
@@ -238,7 +239,7 @@ func topicForEvent(eventName string) string {
 // initializeOutboxTopic creates the watermill schema for the auction
 // topic before the first transactional publish.
 func initializeOutboxTopic(db *sql.DB, wmLogger wm.LoggerAdapter) error {
-	subscriber, err := cwatermill.NewSQLSubscriber(db, "auction.outbox-init", wmLogger)
+	subscriber, err := cwatermill.NewSQLSubscriber(db, "auction.outbox-init", time.Second, wmLogger)
 	if err != nil {
 		return fmt.Errorf("auction service: outbox init subscriber: %w", err)
 	}

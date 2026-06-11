@@ -23,8 +23,6 @@ import (
 // 200 ms, so the auction closes naturally without any sleep. assert.Eventually
 // polls the auction card with a 200 ms tick (no sleep — rule 42).
 func TestAuctionLifecycle(t *testing.T) {
-	t.Parallel()
-
 	c := sharedClient
 
 	// --- participants --------------------------------------------------------
@@ -71,13 +69,15 @@ func TestAuctionLifecycle(t *testing.T) {
 	require.Equal(t, int64(100_000), card.StartPriceMinor)
 
 	// --- place bids ----------------------------------------------------------
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	// First qualifying bid per bidder retries while the bidder-profile
+	// projection catches up with the just-issued verification.
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID:       uuid.New(),
 		AmountMinor: 100_000,
 		Currency:    "EUR",
 	}, bidder1Token)
 
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID:       uuid.New(),
 		AmountMinor: 110_000,
 		Currency:    "EUR",
@@ -91,19 +91,22 @@ func TestAuctionLifecycle(t *testing.T) {
 	assert.Equal(t, bidder2ID, *card.LeaderID)
 
 	// --- wait for ClosingWorker (polls every 200 ms) -------------------------
+	// Poll variants only inside Eventually: require.* in the condition
+	// goroutine Goexits it and freezes Eventually (see tests/client.go).
 	assert.Eventually(t, func() bool {
-		card = c.AuctionCard(t, auctionID, bidder1Token)
-		return card.Status == "closed"
+		got, ok := c.AuctionCardPoll(t, auctionID, bidder1Token)
+		return ok && got.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond,
 		"auction was not closed by the worker within 10 s")
 
+	card = c.AuctionCard(t, auctionID, bidder1Token)
 	require.NotNil(t, card.Outcome, "closed auction must have an outcome")
 	assert.Equal(t, "sold", *card.Outcome)
 
 	// --- settlement saga started by AuctionClosedV1 --------------------------
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "awaiting_payment" || s.State == "settled"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && (s.State == "awaiting_payment" || s.State == "settled")
 	}, 10*time.Second, 200*time.Millisecond,
 		"settlement saga did not reach awaiting_payment within 10 s")
 

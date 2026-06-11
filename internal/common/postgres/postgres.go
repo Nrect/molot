@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/XSAM/otelsql"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
@@ -16,6 +17,16 @@ import (
 
 	// Registers the "pgx" database/sql driver.
 	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+// Pool sizing. MaxIdle == MaxOpen on purpose: the bus subscribers poll
+// continuously (BUS_POLL_INTERVAL), and the database/sql default of 2
+// idle connections makes every poll open and close a fresh TCP
+// connection — churn that exhausts ephemeral ports under load. Keeping
+// every pooled connection reusable removes the churn entirely.
+const (
+	maxOpenConns    = 30
+	connMaxIdleTime = 5 * time.Minute
 )
 
 // NewDB opens the process connection pool over the pgx stdlib driver,
@@ -28,6 +39,9 @@ func NewDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open postgres pool: %w", err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 
 	if _, err := otelsql.RegisterDBStatsMetrics(db, attrs); err != nil {
 		err = fmt.Errorf("register db pool metrics: %w", err)

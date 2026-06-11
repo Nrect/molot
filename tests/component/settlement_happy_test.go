@@ -16,16 +16,14 @@ import (
 
 // TestSettlementHappy covers the nominal settlement path:
 //
-//   AuctionClosed (sold) → saga.Started → IssueInvoice →
-//   saga.AwaitingPayment → winner pays invoice →
-//   InvoicePaid → saga.Settled → auction.SaleSettled →
-//   SaleSettledV1 on seller dashboard
+//	AuctionClosed (sold) → saga.Started → IssueInvoice →
+//	saga.AwaitingPayment → winner pays invoice →
+//	InvoicePaid → saga.Settled → auction.SaleSettled →
+//	SaleSettledV1 on seller dashboard
 //
 // PSP_MODE=success (the shared application default) so every PayInvoice
 // succeeds on the first call.
 func TestSettlementHappy(t *testing.T) {
-	t.Parallel()
-
 	c := sharedClient
 
 	// --- bootstrap participants ----------------------------------------------
@@ -63,24 +61,28 @@ func TestSettlementHappy(t *testing.T) {
 		EndsAt:          now.Add(3 * time.Second),
 	}, sellerToken)
 
-	// runner-up bids first, winner outbids.
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	// runner-up bids first, winner outbids. First qualifying bid per bidder
+	// retries while the verification projection catches up.
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 100_000, Currency: "EUR",
 	}, runnerUpToken)
-	c.PlaceBid(t, auctionID, tests.PlaceBidRequest{
+	c.PlaceBidEventually(t, auctionID, tests.PlaceBidRequest{
 		BidID: uuid.New(), AmountMinor: 110_000, Currency: "EUR",
 	}, winnerToken)
 
 	// Wait for ClosingWorker.
+	// Poll variants only inside Eventually: require.* in the condition
+	// goroutine Goexits it and freezes Eventually (see tests/client.go).
 	assert.Eventually(t, func() bool {
-		return c.AuctionCard(t, auctionID, winnerToken).Status == "closed"
+		card, ok := c.AuctionCardPoll(t, auctionID, winnerToken)
+		return ok && card.Status == "closed"
 	}, 10*time.Second, 200*time.Millisecond, "auction not closed in time")
 
 	// --- saga reaches AwaitingPayment ----------------------------------------
 	var invoiceID uuid.UUID
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		if s.State == "awaiting_payment" && s.InvoiceID != nil {
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		if ok && s.State == "awaiting_payment" && s.InvoiceID != nil {
 			invoiceID = *s.InvoiceID
 			return true
 		}
@@ -103,8 +105,8 @@ func TestSettlementHappy(t *testing.T) {
 
 	// --- saga settles --------------------------------------------------------
 	assert.Eventually(t, func() bool {
-		s := c.GetSettlementStatus(t, auctionID, opsToken)
-		return s.State == "settled"
+		s, ok := c.SettlementStatusPoll(t, auctionID, opsToken)
+		return ok && s.State == "settled"
 	}, 10*time.Second, 200*time.Millisecond, "saga did not settle")
 
 	// Invoice is now paid.
@@ -113,7 +115,10 @@ func TestSettlementHappy(t *testing.T) {
 
 	// --- auction reflects SaleSettled on the seller dashboard ---------------
 	assert.Eventually(t, func() bool {
-		dash := c.SellerDashboard(t, sellerID, sellerToken)
+		dash, ok := c.SellerDashboardPoll(t, sellerID, sellerToken)
+		if !ok {
+			return false
+		}
 		for _, item := range dash.Items {
 			if item.AuctionID == auctionID {
 				return item.SettlementStatus != nil &&
