@@ -1,87 +1,89 @@
-# Molot — эталонная бизнес-система на Go
+# Molot — a reference Go business system
 
-Аукционная площадка (английский аукцион), построенная как **эталон долгоживущей бизнес-системы**: модульный монолит, DDD + CQRS + Clean Architecture, событийная интеграция через transactional outbox, сага с компенсациями, сквозная observability. Архитектура выведена из книги «Go With The Domain» (Three Dots Labs) и зафиксирована контрактом из 55 правил.
+> English | [Русский](README.ru.md)
 
-> Проект учебно-боевой: каждое решение здесь — образец для переноса в реальные системы с большими бизнес-требованиями. Читается сверху вниз: документы → домен → всё остальное.
+An auction platform (English auction) built as a **reference for long-lived business systems**: modular monolith, DDD + CQRS + Clean Architecture, event-driven integration over a transactional outbox, a saga with compensations, and end-to-end observability. The architecture is distilled from *Go With The Domain* (Three Dots Labs) and pinned down by a 55-rule contract.
 
-## Как читать этот репозиторий
+> The project is deliberately "teaching-grade production": every decision here is meant to be a template for real systems with heavy business requirements. Read top-down: documents → domain → everything else.
 
-1. **[docs/BOOK_AUDIT.md](docs/BOOK_AUDIT.md)** — контракт: 55 императивных правил архитектуры (слои, DDD-тактика, repository, CQRS, события, тесты, observability). Всё ревьюится против него.
-2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — рабочая спека системы: context map, агрегаты и инварианты, каталог команд/запросов, события, сага (таблица переходов, идемпотентность, crash-seam карта), схема БД, HTTP API, воркеры, observability-карта.
-3. **[docs/event-storming.md](docs/event-storming.md)** — доменный поток и маппинг «событие/команда → Go-тип/хендлер».
-4. **[docs/adr/](docs/adr/)** — решения с трейдоффами: модульный монолит, Postgres-шина (watermill-sql), граница агрегата Auction, сага settlement, observability.
-5. **Код домена** — начни с [internal/auction/domain/auction](internal/auction/domain/auction) и [internal/settlement/domain/settlement](internal/settlement/domain/settlement) (state machine саги).
-6. **[docs/REVIEW.md](docs/REVIEW.md)** — отчёт ревью реализации против контракта; [docs/test-taxonomy.md](docs/test-taxonomy.md) — уровни тестов; [docs/operations.md](docs/operations.md) — runbook (rollback, dead-letter redelivery).
+## How to read this repository
 
-## Домен в двух словах
+1. **[docs/BOOK_AUDIT.md](docs/BOOK_AUDIT.md)** — the contract: 55 imperative architecture rules (layers, DDD tactics, repositories, CQRS, events, tests, observability). Everything is reviewed against it. *(Russian; identifiers and pattern names in English.)*
+2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the working spec: context map, aggregates and invariants, command/query catalog, events, the saga (transition table, idempotency, crash-seam map), DB schema, HTTP API, time-based workers.
+3. **[docs/event-storming.md](docs/event-storming.md)** — the domain flow and the "event/command → Go type/handler" mapping.
+4. **[docs/adr/](docs/adr/)** — decisions with trade-offs: modular monolith, Postgres-backed bus (watermill-sql), the Auction aggregate boundary, the settlement saga, observability.
+5. **Domain code** — start with [internal/auction/domain/auction](internal/auction/domain/auction) and [internal/settlement/domain/settlement](internal/settlement/domain/settlement) (the saga state machine).
+6. **[docs/REVIEW.md](docs/REVIEW.md)** — implementation review against the contract; [docs/test-taxonomy.md](docs/test-taxonomy.md) — test levels; [docs/operations.md](docs/operations.md) — runbook (rollback, dead-letter redelivery); [docs/HIGHLOAD.md](docs/HIGHLOAD.md) — high-load patterns mapped to this codebase; [docs/ROADMAP.md](docs/ROADMAP.md) — prioritized candidates for next iterations.
 
-Продавец выставляет лот → участники ставят (шаг ставки, анти-снайпинг продлевает окно, резервная цена скрыта) → закрытие по времени → победителю счёт (цена + комиссия) → оплата через PSP → не оплатил в срок: оферта second-chance второму бидеру ИЛИ перевыставление лота (cap = 1) → расчёт завершён/провален. Каждый шаг после молотка оркестрирует сага settlement с идемпотентными компенсациями.
+## The domain in a nutshell
+
+A seller lists a lot → participants bid (bid increment rules, anti-sniping extends the window, the reserve price stays hidden) → the auction closes by time → the winner gets an invoice (hammer price + platform commission) → payment through a PSP → if the payment times out: a second-chance offer to the runner-up OR an automatic relist (capped at one generation) → the settlement completes or fails. Every step after the hammer is orchestrated by the settlement saga with idempotent compensations.
 
 ## Bounded contexts
 
-| Контекст | Суть | Самое интересное |
+| Context | Responsibility | Highlights |
 |---|---|---|
-| `auction` | Лоты, ставки, закрытие, витрины | Агрегат с топ-2 ставками денормализованно + append-only история в границе согласованности; optimistic locking; анти-снайпинг; гонка PlaceBid vs Close решена row lock + guard |
-| `billing` | Счета, PSP, таймаут оплаты | Charge до транзакции + идемпотентный Refund (charged-but-expired гонка закрыта); guard-таблица переходов Invoice; анти-enumeration (чужой счёт = 404) |
-| `settlement` | Сага расчётов | Протокол decide → effect → commit; fast-forward на опережающие события; crash-seam тест на каждый шов |
-| `participant` | Регистрация, верификация | Маленький контекст, который НЕ over-engineered |
-| `notification` | События → email | Тривиальный консьюмер без слоёв — задокументированное исключение |
+| `auction` | Lots, bidding, closing, catalog views | Aggregate keeps the top-2 bids denormalized + an append-only bid history inside the consistency boundary; optimistic locking; anti-sniping; the PlaceBid vs Close race is settled by a row lock + aggregate guards |
+| `billing` | Invoices, PSP, payment timeout | Charge before the transaction + idempotent Refund (the charged-but-expired race is closed); an exhaustive invoice transition guard table; anti-enumeration (someone else's invoice = 404) |
+| `settlement` | The saga | decide → effect → commit protocol; fast-forward on out-of-order events; a unit test for every crash seam |
+| `participant` | Registration, verification | A small context that is deliberately NOT over-engineered |
+| `notification` | Events → email | A trivial consumer without layers — a documented exception |
 
-Связь контекстов: события через **transactional outbox** (watermill-sql: Postgres как шина; Kafka — заменой publisher/subscriber, ADR-0002) + синхронные фасады для команд саги (consumer-side интерфейсы, ADR-0004).
+Context integration: events through a **transactional outbox** (watermill-sql: Postgres as the bus; Kafka later = swapping the publisher/subscriber, ADR-0002) + synchronous facades for saga commands (consumer-side interfaces, ADR-0004).
 
-## Запуск
+## Running it
 
 ```bash
-cp .env.example .env          # дефолты годятся для локалки
+cp .env.example .env          # defaults are fine for local use
 docker compose up -d          # postgres + app + otel-collector + jaeger + prometheus + grafana
-# или локальный бинарь против compose-постгреса:
+# or a local binary against the compose postgres:
 make run
 ```
 
-| Сервис | URL |
+| Service | URL |
 |---|---|
-| API | http://localhost:8080 (healthz/readyz; всё бизнесовое под `/api`, JWT HS256) |
-| Jaeger (трейсы) | http://localhost:16686 — путь «молоток → счёт → оплата → расчёт» виден одним трейсом |
+| API | http://localhost:8080 (healthz/readyz; business endpoints under `/api`, JWT HS256) |
+| Jaeger (traces) | http://localhost:16686 — the "hammer → invoice → payment → settlement" path is a single trace |
 | Prometheus | http://localhost:9090 |
-| Grafana (дашборды) | http://localhost:3000 — «Molot — Contexts RED», «Molot — Bus & Saga» |
+| Grafana (dashboards) | http://localhost:3000 — "Molot — Contexts RED", "Molot — Bus & Saga" |
 
-## Тесты
+## Tests
 
 ```bash
-make test               # unit (domain + app), -race, без докера
-make test-integration   # адаптеры против реального Postgres
-make test-component     # приложение целиком in-process, фейковый PSP
-make test-e2e           # прод-бинари из docker compose, публичный HTTP
+make test               # unit (domain + app), -race, no docker required
+make test-integration   # adapters against a real Postgres
+make test-component     # the whole application in-process, fake PSP
+make test-e2e           # production binaries from docker compose, public HTTP only
 ```
 
-Таксономия уровней — [docs/test-taxonomy.md](docs/test-taxonomy.md). Обязательные паттерны: rollback-тест каждого транзакционного repo, race-тесты («20 горутин, ровно один победитель»), идемпотентность каждого event-хендлера повторной доставкой, crash-seam continuation саги.
+The level taxonomy lives in [docs/test-taxonomy.md](docs/test-taxonomy.md). Mandatory patterns: a rollback test for every transactional repository, race tests ("20 goroutines, exactly one winner"), idempotency of every event handler proven by redelivery, saga crash-seam continuation tests.
 
-## Раскладка
+## Layout
 
 ```
-cmd/monolith/            тонкий main: процесс, сигналы, HTTP-листенер
-internal/monolith/       composition root (прод + компонентные тесты → общий newApplication)
-internal/common/         инфраструктура: CQRS-декораторы (логи+RED+спаны), errs, auth,
-                         postgres (RunInTx/FinishTransaction), watermill (router, outbox, метрики шины)
+cmd/monolith/            thin main: process concerns, signals, the HTTP listener
+internal/monolith/       composition root (prod + component tests → one shared newApplication)
+internal/common/         infrastructure only: CQRS decorators (logs+RED+spans), errs, auth,
+                         postgres (RunInTx/FinishTransaction), watermill (router, outbox, bus metrics)
 internal/<context>/
-  domain/<aggregate>/    stdlib-only: инварианты, behavior-методы, sentinel-ошибки, Repository-интерфейс
-  app/{command,query}/   use cases; consumer-side интерфейсы зависимостей
-  ports/                 HTTP (oapi-codegen strict), event-хендлеры, воркеры
-  adapters/              Postgres/in-memory repo, events_mapper (outbox в той же tx), миграции goose
-  events/                плоские версионированные V1-контракты — единственный импортируемый снаружи пакет
-  service/               сборка контекста + фасад для саги
-api/openapi/             контракты (codegen через make openapi)
+  domain/<aggregate>/    stdlib-only: invariants, behavior methods, sentinel errors, Repository interface
+  app/{command,query}/   use cases; consumer-side dependency interfaces
+  ports/                 HTTP (oapi-codegen strict), event handlers, workers
+  adapters/              Postgres/in-memory repos, events_mapper (outbox in the same tx), goose migrations
+  events/                flat versioned V1 contracts — the only package importable from outside
+  service/               context assembly + the facade for the saga
+api/openapi/             contracts (codegen via make openapi)
 tests/                   component + e2e
 ```
 
-Направление зависимостей enforced: domain ← app ← ports/adapters; чужой `domain/` не импортируется; common без бизнес-типов.
+Dependency direction is CI-enforced: domain ← app ← ports/adapters; importing another context's `domain/` is forbidden; `common` holds zero business types.
 
-## Что дальше (план развития)
+## What's next
 
-Полный список кандидатов с приоритетами — **[docs/ROADMAP.md](docs/ROADMAP.md)**. Кратко:
+The full prioritized candidate list is **[docs/ROADMAP.md](docs/ROADMAP.md)** (11 sections, ~85 items). Briefly:
 
-- Алерты + SLO burn-rate поверх готовых метрик; k6-нагрузка (конкурентные ставки); хаос через Toxiproxy.
-- Ledger двойной записи в billing; supply-chain CI (govulncheck/trivy/SBOM/cosign).
-- Kafka вместо watermill-sql — замена publisher/subscriber + forwarder, контракты не меняются (ADR-0002).
-- Вынос контекста в сервис — события версионированы, фасад заменяется на gRPC-адаптер.
-- Kubernetes (helm + kind в CI), release-пайплайн, бэкапы с restore-тестом.
+- SLO burn-rate alerts on top of the existing metrics; k6 load tests (concurrent bidding); chaos via Toxiproxy.
+- A double-entry ledger in billing; supply-chain CI (govulncheck/trivy/SBOM/cosign).
+- Kafka instead of watermill-sql — swap the publisher/subscriber + forwarder, contracts stay (ADR-0002).
+- Extracting a context into a service — events are already versioned, the facade becomes a gRPC adapter.
+- Kubernetes (helm + kind in CI), a release pipeline, backups with restore drills.
