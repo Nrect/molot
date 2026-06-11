@@ -24,6 +24,8 @@ import (
 	"github.com/pressly/goose/v3"
 	"golang.org/x/sync/errgroup"
 
+	auctionservice "molot/internal/auction/service"
+	billingservice "molot/internal/billing/service"
 	"molot/internal/common/auth"
 	"molot/internal/common/config"
 	"molot/internal/common/logs"
@@ -32,6 +34,9 @@ import (
 	"molot/internal/common/server"
 	"molot/internal/common/tracing"
 	cwatermill "molot/internal/common/watermill"
+	notificationservice "molot/internal/notification/service"
+	participantservice "molot/internal/participant/service"
+	settlementservice "molot/internal/settlement/service"
 )
 
 func main() {
@@ -90,9 +95,16 @@ func run(cfg config.Config, logger *slog.Logger) error {
 
 	// --- migrations -------------------------------------------------------
 	// Each bounded context contributes its embedded goose migrations
-	// (embed.FS over internal/<ctx>/adapters/migrations) to this slice;
-	// they run in order before anything serves.
-	var migrations []fs.FS
+	// (fs.FS rooted at the .sql files) with its own version table, so
+	// contexts evolve their schemas independently; they all run before
+	// anything serves.
+	migrations := []contextMigrations{
+		{table: "goose_db_version_participant", fs: participantservice.Migrations},
+		{table: "goose_db_version_auction", fs: auctionservice.Migrations},
+		{table: "goose_db_version_billing", fs: billingservice.Migrations()},
+		{table: "goose_db_version_settlement", fs: settlementservice.Migrations},
+		{table: "goose_db_version_notification", fs: notificationservice.Migrations},
+	}
 	if err := runMigrations(ctx, db, migrations); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
@@ -115,32 +127,92 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	subscriberConstructor := func(handlerName string) (message.Subscriber, error) {
 		return cwatermill.NewSQLSubscriber(db, handlerName, wmLogger)
 	}
-	_ = subscriberConstructor // used by the context registration blocks below
+
+	// Bus health gauges (§11): dead-letter size and per-topic consumer
+	// lag, observed by scanning the watermill tables on every metric
+	// collection.
+	if err := cwatermill.RegisterBusMetrics(db, meterProvider); err != nil {
+		return fmt.Errorf("register bus metrics: %w", err)
+	}
 
 	// --- http router --------------------------------------------------------
 	rootRouter, apiRouter := server.NewRouter(logger, authMiddleware)
-	_ = apiRouter // contexts mount their handlers here (RegisterHTTP)
 
 	// --- context registration: auction ----------------------------------
-	// auctionSvc := auctionservice.NewService(...)
-	// auctionSvc.RegisterHTTP(apiRouter); auctionSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
-	// g.Go(auctionSvc.ClosingWorker(ctx)) — joins the errgroup below.
+	auctionSvc, err := auctionservice.NewService(auctionservice.Deps{
+		DB:                  db,
+		Logger:              logger,
+		MeterProvider:       meterProvider,
+		TracerProvider:      tracerProvider,
+		PlatformCurrency:    cfg.PlatformCurrency,
+		VerifyAboveMinor:    cfg.VerifyAboveMinor,
+		SnipeWindow:         cfg.SnipeWindow,
+		SnipeExtension:      cfg.SnipeExtension,
+		SnipeMaxExtensions:  cfg.SnipeMaxExtensions,
+		ClosingPollInterval: cfg.ClosingPollInterval,
+	})
+	if err != nil {
+		return fmt.Errorf("assemble auction context: %w", err)
+	}
+	auctionSvc.RegisterHTTP(apiRouter)
+	if err := auctionSvc.RegisterEventHandlers(wmRouter, subscriberConstructor); err != nil {
+		return fmt.Errorf("register auction event handlers: %w", err)
+	}
 
 	// --- context registration: participant -------------------------------
-	// participantSvc := participantservice.NewService(...)
-	// participantSvc.RegisterHTTP(apiRouter)
+	participantSvc, err := participantservice.NewService(db, logger, meterProvider, tracerProvider)
+	if err != nil {
+		return fmt.Errorf("assemble participant context: %w", err)
+	}
+	participantSvc.RegisterHTTP(apiRouter)
+	// Registration IS the entry (§8): POST /participants lives on the
+	// root router, outside the JWT-protected /api group.
+	participantSvc.RegisterPublicHTTP(rootRouter)
 
 	// --- context registration: billing ------------------------------------
-	// billingSvc := billingservice.NewService(...)
-	// billingSvc.RegisterHTTP(apiRouter); g.Go(billingSvc.ExpiryWorker(ctx))
+	billingSvc, err := billingservice.NewService(billingservice.Deps{
+		Logger:                logger,
+		DB:                    db,
+		WatermillLogger:       wmLogger,
+		MeterProvider:         meterProvider,
+		TracerProvider:        tracerProvider,
+		CommissionBasisPoints: cfg.CommissionBasisPoints,
+		PaymentTerm:           cfg.PaymentTerm,
+		PSPMode:               string(cfg.PSPMode),
+		ExpiryPollInterval:    cfg.ExpiryPollInterval,
+	})
+	if err != nil {
+		return fmt.Errorf("assemble billing context: %w", err)
+	}
+	billingSvc.RegisterHTTP(apiRouter)
 
 	// --- context registration: settlement ---------------------------------
-	// settlementSvc := settlementservice.NewService(...)
-	// settlementSvc.RegisterHTTP(apiRouter); settlementSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
+	// The saga consumes the other contexts' sync facades; the interface
+	// types live in settlement/adapters, the values arrive from here
+	// (ADR-0004).
+	settlementSvc, err := settlementservice.NewService(settlementservice.Deps{
+		DB:             db,
+		Logger:         logger,
+		MeterProvider:  meterProvider,
+		TracerProvider: tracerProvider,
+		AuctionFacade:  auctionSvc.Facade(),
+		BillingFacade:  billingSvc.Facade(),
+		RelistDelay:    cfg.RelistDelay,
+		RelistDuration: cfg.RelistDuration,
+	})
+	if err != nil {
+		return fmt.Errorf("assemble settlement context: %w", err)
+	}
+	settlementSvc.RegisterHTTP(apiRouter)
+	if err := settlementSvc.RegisterEventHandlers(wmRouter, subscriberConstructor); err != nil {
+		return fmt.Errorf("register settlement event handlers: %w", err)
+	}
 
 	// --- context registration: notification -------------------------------
-	// notificationSvc := notificationservice.NewService(...)
-	// notificationSvc.RegisterEventHandlers(wmRouter, subscriberConstructor)
+	notificationSvc := notificationservice.NewService(db, logger)
+	if err := notificationSvc.RegisterEventHandlers(wmRouter, subscriberConstructor); err != nil {
+		return fmt.Errorf("register notification event handlers: %w", err)
+	}
 
 	// --- health -----------------------------------------------------------
 	server.RegisterHealthEndpoints(rootRouter, logger, []server.ReadinessProbe{
@@ -163,6 +235,11 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return nil
 	})
 
+	// The two in-binary workers (§10): by-time auction closing and
+	// invoice payment timeout. They stop with everyone else on ctx.
+	g.Go(auctionSvc.ClosingWorker(ctx))
+	g.Go(billingSvc.ExpiryWorker(ctx))
+
 	g.Go(func() error {
 		// Serve only after the bus is consuming, so readiness cannot
 		// flap during startup.
@@ -179,18 +256,25 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	return g.Wait()
 }
 
-// runMigrations applies every context's embedded goose migrations.
-// Per-context version tables arrive together with the first context
-// FS (goose.WithTableName per context); with zero registered contexts
-// this is a no-op.
-func runMigrations(ctx context.Context, db *sql.DB, migrations []fs.FS) error {
-	for _, fsys := range migrations {
-		provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys)
+// contextMigrations is one bounded context's goose migration set with
+// its dedicated version table (goose_db_version_<ctx>).
+type contextMigrations struct {
+	table string
+	fs    fs.FS
+}
+
+// runMigrations applies every context's embedded goose migrations in
+// order, each tracked in its own version table so contexts version
+// their schemas independently.
+func runMigrations(ctx context.Context, db *sql.DB, migrations []contextMigrations) error {
+	for _, m := range migrations {
+		provider, err := goose.NewProvider(goose.DialectPostgres, db, m.fs,
+			goose.WithTableName(m.table))
 		if err != nil {
-			return fmt.Errorf("create goose provider: %w", err)
+			return fmt.Errorf("create goose provider (%s): %w", m.table, err)
 		}
 		if _, err := provider.Up(ctx); err != nil {
-			return fmt.Errorf("apply migrations: %w", err)
+			return fmt.Errorf("apply migrations (%s): %w", m.table, err)
 		}
 	}
 	return nil

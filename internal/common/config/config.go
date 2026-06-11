@@ -46,6 +46,16 @@ const (
 type Config struct {
 	PlatformCurrency string // PLATFORM_CURRENCY (required): ISO-4217 alpha code, e.g. "EUR"
 
+	// CommissionBasisPoints is the platform's cut snapshotted onto every
+	// invoice at issue time (1 bp = 0.01%, valid range 0..10000).
+	CommissionBasisPoints int // COMMISSION_BASIS_POINTS (default 1000 = 10%)
+
+	// Listing policy snapshotted onto every auction at listing time (§2.1).
+	VerifyAboveMinor   int64         // VERIFY_ABOVE_MINOR (default 100000): verified_bid_threshold, minor units
+	SnipeWindow        time.Duration // SNIPE_WINDOW (default 5m): bid inside the window extends the deadline
+	SnipeExtension     time.Duration // SNIPE_EXTENSION (default 5m): extension per snipe bid
+	SnipeMaxExtensions int           // SNIPE_MAX_EXTENSIONS (default 3): cap of extensions per auction
+
 	PaymentTerm    time.Duration // PAYMENT_TERM (default 48h): invoice due_at = issued_at + PaymentTerm
 	PSPMode        PSPMode       // PSP_MODE (default success)
 	RelistDelay    time.Duration // RELIST_DELAY (default 1h): relisted auction starts_at = now + delay
@@ -76,6 +86,11 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 
 	cfg := Config{
 		PlatformCurrency:         l.required("PLATFORM_CURRENCY"),
+		CommissionBasisPoints:    l.intInRange("COMMISSION_BASIS_POINTS", 1000, 0, 10_000),
+		VerifyAboveMinor:         l.int64NonNegative("VERIFY_ABOVE_MINOR", 100_000),
+		SnipeWindow:              l.duration("SNIPE_WINDOW", 5*time.Minute),
+		SnipeExtension:           l.duration("SNIPE_EXTENSION", 5*time.Minute),
+		SnipeMaxExtensions:       l.intInRange("SNIPE_MAX_EXTENSIONS", 3, 0, 1000),
 		PaymentTerm:              l.duration("PAYMENT_TERM", 48*time.Hour),
 		PSPMode:                  PSPMode(l.enum("PSP_MODE", string(PSPModeSuccess), string(PSPModeSuccess), string(PSPModeDecline), string(PSPModeFlaky))),
 		RelistDelay:              l.duration("RELIST_DELAY", time.Hour),
@@ -145,6 +160,32 @@ func (l *loader) duration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (l *loader) intInRange(key string, def, minVal, maxVal int) int {
+	raw, ok := l.lookup(key)
+	if !ok || raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < minVal || v > maxVal {
+		l.fail(key, fmt.Sprintf("must be an integer in [%d, %d], got %q", minVal, maxVal, raw))
+		return def
+	}
+	return v
+}
+
+func (l *loader) int64NonNegative(key string, def int64) int64 {
+	raw, ok := l.lookup(key)
+	if !ok || raw == "" {
+		return def
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v < 0 {
+		l.fail(key, fmt.Sprintf("must be a non-negative integer, got %q", raw))
+		return def
+	}
+	return v
 }
 
 func (l *loader) port(key string, def int) int {

@@ -54,6 +54,11 @@ type LogFormat string  // LogFormatJSON | LogFormatText
 
 type Config struct {
     PlatformCurrency         string        // PLATFORM_CURRENCY (required, "EUR")
+    CommissionBasisPoints    int           // COMMISSION_BASIS_POINTS (default 1000, 0..10000)
+    VerifyAboveMinor         int64         // VERIFY_ABOVE_MINOR (default 100000, ≥0)
+    SnipeWindow              time.Duration // SNIPE_WINDOW (default 5m)
+    SnipeExtension           time.Duration // SNIPE_EXTENSION (default 5m)
+    SnipeMaxExtensions       int           // SNIPE_MAX_EXTENSIONS (default 3, ≥0)
     PaymentTerm              time.Duration // PAYMENT_TERM (default 48h)
     PSPMode                  PSPMode       // PSP_MODE (default success)
     RelistDelay              time.Duration // RELIST_DELAY (default 1h)
@@ -208,6 +213,14 @@ func NewEventProcessor(router *message.Router,
     generateTopic func(eventName string) string,
     subscriberConstructor func(handlerName string) (message.Subscriber, error),
     logger watermill.LoggerAdapter) (*cqrs.EventProcessor, error)
+    // AckOnUnknownEvent: true — топики мульти-событийные, хендлер потребляет один тип;
+    // чужие имена событий на топике ack-аются молча, не уходят по ретраям в dead letter
+
+func RegisterBusMetrics(db *sql.DB, meterProvider metric.MeterProvider) error
+    // observable-гейджи §11 по watermill-таблицам (скан на каждом metric collection):
+    // molot_bus_dead_letter_size — не доставленные заново сообщения dead-letter топика;
+    // molot_bus_oldest_message_age_seconds{topic} — возраст старейшего сообщения,
+    // не ack-нутого самой медленной consumer group топика
 ```
 
 `generateTopic` мапит имя события (`AuctionClosedV1`) на топик — контексты публикуют свои `events.Topic` константы.

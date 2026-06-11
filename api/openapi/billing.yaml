@@ -1,0 +1,173 @@
+openapi: "3.0.3"
+info:
+  title: Molot Billing API
+  description: |
+    Billing context endpoints (ARCHITECTURE.md §8): the debtor's invoice
+    views and the PSP payment protocol (§3.1). Anti-enumeration: a
+    foreign invoice is indistinguishable from a missing one — both
+    answer 404 invoice-not-found. Errors are slug errors:
+    {"slug": "..."} with the HTTP status carrying the kind.
+  version: "1.0"
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+paths:
+  /invoices/{invoiceID}:
+    get:
+      operationId: getInvoice
+      summary: Invoice details for its debtor
+      tags: [billing]
+      parameters:
+        - $ref: "#/components/parameters/invoiceID"
+      responses:
+        "200":
+          description: The invoice.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+        "404":
+          description: invoice-not-found — unknown AND foreign invoices alike (anti-enumeration).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /invoices/{invoiceID}/payment:
+    post:
+      operationId: payInvoice
+      summary: Pay the invoice (PSP protocol with refund compensation)
+      description: |
+        204 is also returned for an idempotent retry of an already paid
+        invoice. 502 psp-unavailable is retryable: the PSP charge is
+        idempotent by invoice id.
+      tags: [billing]
+      parameters:
+        - $ref: "#/components/parameters/invoiceID"
+      responses:
+        "204":
+          description: Paid (including the idempotent retry of an already paid invoice).
+        "404":
+          description: invoice-not-found — unknown AND foreign invoices alike.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: invoice-no-longer-payable | payment-declined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: psp-unavailable — safe to retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /bidders/{bidderID}/invoices:
+    get:
+      operationId: getBidderPendingInvoices
+      summary: Pending invoices of the bidder (only their own)
+      tags: [billing]
+      parameters:
+        - name: bidderID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Only "pending" is supported.
+          schema:
+            type: string
+            enum: [pending]
+      responses:
+        "200":
+          description: The bidder's pending invoices.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceList"
+        "400":
+          description: unsupported-status-filter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: not-own-invoices — the path bidder is not the caller (own path-ID, no enumeration surface).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    invoiceID:
+      name: invoiceID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    Invoice:
+      type: object
+      required:
+        - invoiceId
+        - auctionId
+        - status
+        - hammerMinor
+        - commissionMinor
+        - totalMinor
+        - currency
+        - dueAt
+        - attempt
+      properties:
+        invoiceId:
+          type: string
+          format: uuid
+        auctionId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, paid, expired, voided]
+        hammerMinor:
+          type: integer
+          format: int64
+        commissionMinor:
+          type: integer
+          format: int64
+        totalMinor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        dueAt:
+          type: string
+          format: date-time
+        attempt:
+          type: integer
+          description: 1 = original winner, 2 = second chance.
+    InvoiceList:
+      type: object
+      required: [invoices]
+      properties:
+        invoices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Invoice"
+    Error:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string

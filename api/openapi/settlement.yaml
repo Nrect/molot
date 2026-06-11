@@ -1,0 +1,147 @@
+openapi: "3.0.3"
+info:
+  title: Molot Settlement API
+  description: |
+    Settlement context endpoints (ARCHITECTURE.md §8): the runner-up's
+    second-chance decline (§6.4) and the operations-only saga status
+    view. Errors are slug errors: {"slug": "..."} with the HTTP status
+    carrying the kind.
+  version: "1.0"
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+paths:
+  /auctions/{auctionID}/second-chance/decline:
+    post:
+      operationId: declineSecondChanceOffer
+      summary: Decline the second-chance offer (runner-up debtor only)
+      description: |
+        204 also covers the idempotent retry whose outcome already
+        matches — the benign race against the expiry worker resolves to
+        the same compensation fork (§6.4).
+      tags: [settlement]
+      parameters:
+        - $ref: "#/components/parameters/auctionID"
+      responses:
+        "204":
+          description: Declined (or the same outcome was already reached).
+        "403":
+          description: not-offer-recipient — the caller does not hold the live offer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: settlement-not-found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: offer-already-paid — the payment won the race; the sale settles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auctions/{auctionID}/settlement:
+    get:
+      operationId: getSettlementStatus
+      summary: Settlement saga status (operations role)
+      tags: [settlement]
+      parameters:
+        - $ref: "#/components/parameters/auctionID"
+      responses:
+        "200":
+          description: The saga state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settlement"
+        "403":
+          description: operations-only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: settlement-not-found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    auctionID:
+      name: auctionID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    Settlement:
+      type: object
+      required:
+        - auctionId
+        - state
+        - winnerId
+        - hammerMinor
+        - currency
+        - runnerUpQualifies
+        - relistGeneration
+        - attempt
+      properties:
+        auctionId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum:
+            - started
+            - awaiting_payment
+            - awarding_runner_up
+            - second_chance_payment
+            - settled
+            - relisted
+            - failed_unsold
+        winnerId:
+          type: string
+          format: uuid
+          description: The current debtor (the runner-up after an award).
+        hammerMinor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        runnerUpId:
+          type: string
+          format: uuid
+        runnerUpMinor:
+          type: integer
+          format: int64
+        runnerUpQualifies:
+          type: boolean
+        relistGeneration:
+          type: integer
+        attempt:
+          type: integer
+          description: 1 = original winner, 2 = second chance.
+        invoiceId:
+          type: string
+          format: uuid
+          description: The invoice the saga currently awaits.
+        failureReason:
+          type: string
+          enum: [payment_timeout, second_chance_declined]
+    Error:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string

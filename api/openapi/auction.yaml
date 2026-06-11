@@ -1,0 +1,363 @@
+# Auction context HTTP API (ARCHITECTURE §8). Mounted under /api by
+# the common router (JWT auth + middleware applied there). Commands
+# return no business data: create endpoints answer 204 + Content-
+# Location (rule 31); errors are {"slug": "..."} via httperr.
+openapi: 3.0.3
+info:
+  title: Molot — auction context API
+  version: 1.0.0
+security:
+  - bearerAuth: []
+paths:
+  /auctions:
+    post:
+      operationId: ListAuction
+      summary: List a lot for bidding (id is client-generated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListAuctionRequest"
+      responses:
+        "204":
+          description: Auction listed (or an idempotent retry of the same id)
+          headers:
+            Content-Location:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+    get:
+      operationId: ActiveAuctionsCatalog
+      summary: Page through the public catalog of active auctions
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Catalog page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogPage"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auctions/{auctionID}:
+    get:
+      operationId: AuctionCard
+      summary: Public auction card
+      parameters:
+        - $ref: "#/components/parameters/AuctionID"
+      responses:
+        "200":
+          description: Auction card
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuctionCard"
+        "404":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auctions/{auctionID}/bids:
+    get:
+      operationId: BidHistory
+      summary: Page through the bid history of an auction
+      parameters:
+        - $ref: "#/components/parameters/AuctionID"
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Bid history page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BidHistoryPage"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: PlaceBid
+      summary: Place a bid (bid id is client-generated)
+      parameters:
+        - $ref: "#/components/parameters/AuctionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaceBidRequest"
+      responses:
+        "204":
+          description: Bid accepted
+          headers:
+            Content-Location:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          description: seller-cannot-bid | verification-required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: bid-below-minimum | leader-cannot-outbid-self | auction-not-open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auctions/{auctionID}/cancellation:
+    post:
+      operationId: CancelAuction
+      summary: Cancel a bidless listing (seller only)
+      parameters:
+        - $ref: "#/components/parameters/AuctionID"
+      responses:
+        "204":
+          description: Auction cancelled
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          description: not-seller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: auction-has-bids | already-closed | auction-cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /sellers/{sellerID}/dashboard:
+    get:
+      operationId: SellerDashboard
+      summary: Seller's own dashboard (the seller themselves only)
+      parameters:
+        - name: sellerID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    AuctionID:
+      name: auctionID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Error:
+      description: Slug error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string
+    ListAuctionRequest:
+      type: object
+      required: [id, title, startPriceMinor, incrementMinor, currency, startsAt, endsAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        startPriceMinor:
+          type: integer
+          format: int64
+        incrementMinor:
+          type: integer
+          format: int64
+        reservePriceMinor:
+          type: integer
+          format: int64
+          description: Omit for no reserve; never exposed in reads.
+        currency:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+    PlaceBidRequest:
+      type: object
+      required: [bidId, amountMinor, currency]
+      properties:
+        bidId:
+          type: string
+          format: uuid
+        amountMinor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+    CatalogPage:
+      type: object
+      required: [items, total, page]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogItem"
+        total:
+          type: integer
+        page:
+          type: integer
+    CatalogItem:
+      type: object
+      required:
+        [
+          auctionId,
+          title,
+          sellerId,
+          currentPriceMinor,
+          minimalNextBidMinor,
+          currency,
+          bidCount,
+          endsAt,
+          endingSoon,
+        ]
+      properties:
+        auctionId: { type: string, format: uuid }
+        title: { type: string }
+        sellerId: { type: string, format: uuid }
+        currentPriceMinor: { type: integer, format: int64 }
+        minimalNextBidMinor: { type: integer, format: int64 }
+        currency: { type: string }
+        bidCount: { type: integer }
+        endsAt: { type: string, format: date-time }
+        endingSoon: { type: boolean }
+    AuctionCard:
+      type: object
+      required:
+        [
+          auctionId,
+          title,
+          description,
+          sellerId,
+          status,
+          startPriceMinor,
+          currentPriceMinor,
+          minimalNextBidMinor,
+          incrementMinor,
+          currency,
+          hasReserve,
+          startsAt,
+          endsAt,
+          extensionsUsed,
+          bidCount,
+          recentBids,
+        ]
+      properties:
+        auctionId: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        sellerId: { type: string, format: uuid }
+        status: { type: string }
+        outcome: { type: string }
+        startPriceMinor: { type: integer, format: int64 }
+        currentPriceMinor: { type: integer, format: int64 }
+        minimalNextBidMinor: { type: integer, format: int64 }
+        incrementMinor: { type: integer, format: int64 }
+        currency: { type: string }
+        hasReserve: { type: boolean }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        extensionsUsed: { type: integer }
+        bidCount: { type: integer }
+        leaderId: { type: string, format: uuid }
+        recentBids:
+          type: array
+          items:
+            $ref: "#/components/schemas/BidView"
+    BidView:
+      type: object
+      required: [bidId, bidderDisplayName, amountMinor, placedAt]
+      properties:
+        bidId: { type: string, format: uuid }
+        bidderDisplayName: { type: string }
+        amountMinor: { type: integer, format: int64 }
+        placedAt: { type: string, format: date-time }
+    BidHistoryPage:
+      type: object
+      required: [items, total, page]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BidView"
+        total:
+          type: integer
+        page:
+          type: integer
+    Dashboard:
+      type: object
+      required: [items, activeCount, soldTotalMinor, currency]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardItem"
+        activeCount:
+          type: integer
+        soldTotalMinor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+    DashboardItem:
+      type: object
+      required: [auctionId, title, status, hammerPriceMinor, bidCount, endsAt]
+      properties:
+        auctionId: { type: string, format: uuid }
+        title: { type: string }
+        status: { type: string }
+        outcome: { type: string }
+        settlementStatus: { type: string }
+        hammerPriceMinor: { type: integer, format: int64 }
+        bidCount: { type: integer }
+        endsAt: { type: string, format: date-time }

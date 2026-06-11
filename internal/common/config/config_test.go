@@ -74,6 +74,11 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		got  any
 		want any
 	}{
+		{"CommissionBasisPoints", cfg.CommissionBasisPoints, 1000},
+		{"VerifyAboveMinor", cfg.VerifyAboveMinor, int64(100_000)},
+		{"SnipeWindow", cfg.SnipeWindow, 5 * time.Minute},
+		{"SnipeExtension", cfg.SnipeExtension, 5 * time.Minute},
+		{"SnipeMaxExtensions", cfg.SnipeMaxExtensions, 3},
 		{"PaymentTerm", cfg.PaymentTerm, 48 * time.Hour},
 		{"PSPMode", cfg.PSPMode, PSPModeSuccess},
 		{"RelistDelay", cfg.RelistDelay, time.Hour},
@@ -97,6 +102,11 @@ func TestLoadParsesTypedValues(t *testing.T) {
 	t.Parallel()
 
 	env := validEnv()
+	env["COMMISSION_BASIS_POINTS"] = "250"
+	env["VERIFY_ABOVE_MINOR"] = "5000000000"
+	env["SNIPE_WINDOW"] = "2m"
+	env["SNIPE_EXTENSION"] = "90s"
+	env["SNIPE_MAX_EXTENSIONS"] = "10"
 	env["PAYMENT_TERM"] = "30s"
 	env["PSP_MODE"] = "flaky"
 	env["RELIST_DELAY"] = "10m"
@@ -114,6 +124,15 @@ func TestLoadParsesTypedValues(t *testing.T) {
 
 	if cfg.PlatformCurrency != "EUR" {
 		t.Errorf("PlatformCurrency = %q", cfg.PlatformCurrency)
+	}
+	if cfg.CommissionBasisPoints != 250 {
+		t.Errorf("CommissionBasisPoints = %d", cfg.CommissionBasisPoints)
+	}
+	if cfg.VerifyAboveMinor != 5_000_000_000 {
+		t.Errorf("VerifyAboveMinor = %d", cfg.VerifyAboveMinor)
+	}
+	if cfg.SnipeWindow != 2*time.Minute || cfg.SnipeExtension != 90*time.Second || cfg.SnipeMaxExtensions != 10 {
+		t.Errorf("snipe policy = %v/%v/%d", cfg.SnipeWindow, cfg.SnipeExtension, cfg.SnipeMaxExtensions)
 	}
 	if cfg.PaymentTerm != 30*time.Second {
 		t.Errorf("PaymentTerm = %v", cfg.PaymentTerm)
@@ -165,6 +184,26 @@ func TestLoadValidation(t *testing.T) {
 			name:       "port must be numeric",
 			mutate:     func(env map[string]string) { env["HTTP_PORT"] = "eight" },
 			wantErrFor: "HTTP_PORT",
+		},
+		{
+			name:       "commission must not exceed 10000 bp",
+			mutate:     func(env map[string]string) { env["COMMISSION_BASIS_POINTS"] = "10001" },
+			wantErrFor: "COMMISSION_BASIS_POINTS",
+		},
+		{
+			name:       "commission must not be negative",
+			mutate:     func(env map[string]string) { env["COMMISSION_BASIS_POINTS"] = "-1" },
+			wantErrFor: "COMMISSION_BASIS_POINTS",
+		},
+		{
+			name:       "verify-above threshold must not be negative",
+			mutate:     func(env map[string]string) { env["VERIFY_ABOVE_MINOR"] = "-100" },
+			wantErrFor: "VERIFY_ABOVE_MINOR",
+		},
+		{
+			name:       "snipe extensions cap must be an integer",
+			mutate:     func(env map[string]string) { env["SNIPE_MAX_EXTENSIONS"] = "many" },
+			wantErrFor: "SNIPE_MAX_EXTENSIONS",
 		},
 		{
 			name:       "auth mode is a closed enum",

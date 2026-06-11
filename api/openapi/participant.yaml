@@ -1,0 +1,164 @@
+openapi: "3.0.3"
+info:
+  title: Molot participant API
+  description: >
+    Registration and verification of auction participants
+    (docs/ARCHITECTURE.md §2.3, §8). Authenticated routes are mounted
+    under the /api group; registration is public ("registration IS the
+    entry") and is therefore mounted on the root router, because the
+    common /api group enforces JWT on every route.
+  version: "1.0"
+paths:
+  /participants:
+    post:
+      operationId: RegisterParticipant
+      summary: Register a new participant
+      description: >
+        Public endpoint, no authentication. The participant UUID is
+        client-generated; the command returns no business data —
+        204 with a content-location of the created profile.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterParticipantRequest"
+      responses:
+        "204":
+          description: Participant registered.
+          headers:
+            Content-Location:
+              description: URL of the registered participant profile.
+              schema:
+                type: string
+        "400":
+          description: invalid-email / invalid-participant-id / invalid-display-name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: email-taken
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /participants/{participantID}:
+    get:
+      operationId: ParticipantProfile
+      summary: Read a participant profile
+      parameters:
+        - $ref: "#/components/parameters/participantID"
+      responses:
+        "200":
+          description: The participant profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+        "400":
+          description: invalid-participant-id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: participant-not-found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /participants/{participantID}/verification:
+    post:
+      operationId: VerifyParticipant
+      summary: Verify a participant (operations role)
+      parameters:
+        - $ref: "#/components/parameters/participantID"
+      responses:
+        "204":
+          description: Participant verified.
+        "400":
+          description: invalid-participant-id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: operations-only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: participant-not-found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: already-verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    participantID:
+      name: participantID
+      in: path
+      required: true
+      description: Participant UUID.
+      schema:
+        type: string
+  schemas:
+    Error:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string
+          description: Stable client-facing error identifier.
+    RegisterParticipantRequest:
+      type: object
+      required: [id, email, displayName]
+      properties:
+        id:
+          type: string
+          description: Client-generated participant UUID.
+        email:
+          type: string
+        displayName:
+          type: string
+    ProfileResponse:
+      type: object
+      required: [participantId, email, displayName, status]
+      properties:
+        participantId:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        status:
+          type: string
+          enum: [registered, verified]
+security:
+  - bearerAuth: []

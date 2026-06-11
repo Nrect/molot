@@ -43,7 +43,10 @@ func NewEventBus(
 // subscriberConstructor receives the handler name and should return a
 // NewSQLSubscriber with the handler name as consumer group, giving each
 // handler an independent offset (idempotency lives in the handlers,
-// §6.6).
+// §6.6). Topics carry multiple event types while a handler consumes
+// one, so messages with an unknown event name on the handler's topic
+// are acked and ignored (AckOnUnknownEvent) instead of erroring through
+// the retry middleware into the dead letter.
 func NewEventProcessor(
 	router *message.Router,
 	generateTopic func(eventName string) string,
@@ -51,6 +54,7 @@ func NewEventProcessor(
 	logger wm.LoggerAdapter,
 ) (*cqrs.EventProcessor, error) {
 	processor, err := cqrs.NewEventProcessorWithConfig(router, cqrs.EventProcessorConfig{
+		AckOnUnknownEvent: true,
 		GenerateSubscribeTopic: func(params cqrs.EventProcessorGenerateSubscribeTopicParams) (string, error) {
 			return generateTopic(params.EventName), nil
 		},
