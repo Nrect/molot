@@ -18,9 +18,11 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.8
+      # Built from source with the project's Go toolchain: the action's
+      # prebuilt binary is compiled with an older Go and refuses configs
+      # targeting a newer language version.
+      - run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+      - run: golangci-lint run --timeout 5m
 
   build:
     runs-on: ubuntu-latest
