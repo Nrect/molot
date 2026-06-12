@@ -8,7 +8,7 @@ An auction platform (English auction) built as a **reference for long-lived busi
 
 ## How to read this repository
 
-0. **[docs/TEXTBOOK.md](docs/TEXTBOOK.md)** — the mini-textbook: WHY this architecture, golden rules with rationale (problem → naive solution → why it hurts → how it's done here). Start here if you want the reasoning, not just the structure. *(Russian.)*
+0. **[docs/book/](docs/book/README.md)** — the full book: 18 deep-dive chapters (strategy → core → integration → quality → perspective), each grounded in real code excerpts from this repository, written for mid/senior engineers. **[docs/TEXTBOOK.md](docs/TEXTBOOK.md)** is its condensed digest — golden rules with rationale. *(Both Russian.)*
 1. **[docs/BOOK_AUDIT.md](docs/BOOK_AUDIT.md)** — the contract: 55 imperative architecture rules (layers, DDD tactics, repositories, CQRS, events, tests, observability). Everything is reviewed against it. *(Russian; identifiers and pattern names in English.)*
 2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the working spec: context map, aggregates and invariants, command/query catalog, events, the saga (transition table, idempotency, crash-seam map), DB schema, HTTP API, time-based workers.
 3. **[docs/event-storming.md](docs/event-storming.md)** — the domain flow and the "event/command → Go type/handler" mapping.
