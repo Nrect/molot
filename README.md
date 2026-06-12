@@ -79,6 +79,10 @@ tests/                   component + e2e
 
 Dependency direction is CI-enforced: domain ← app ← ports/adapters; importing another context's `domain/` is forbidden; `common` holds zero business types.
 
+## License & attribution
+
+Code is MIT; the documentation and the book are **CC BY 4.0** — free to use, study and adapt, but quoting or building upon these materials in articles, courses or talks **requires crediting the author and linking to this repository**. Details in [LICENSE](LICENSE).
+
 ## What's next
 
 The full prioritized candidate list is **[docs/ROADMAP.md](docs/ROADMAP.md)** (11 sections, ~85 items). Briefly:
