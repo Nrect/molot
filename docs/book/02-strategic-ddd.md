@@ -169,6 +169,27 @@ ListAuction ──► AuctionListed
 
 По умолчанию связь асинхронная — интеграционные события через transactional outbox (глава 8). Пакет `events/` каждого контекста — это его **Published Language**: плоские версионированные структуры, единственное, что разрешено импортировать снаружи. Синхронный вызов — исключение, допустимое только когда процесс синхронен *по природе*: шагу саги нужен результат команды до перехода состояния (трейдофф — [ADR-0004](../adr/0004-settlement-saga.md)).
 
+Карта ниже показывает все пять контекстов и характер каждой связи — async-события через outbox или sync-фасад изнутри саги:
+
+```mermaid
+flowchart LR
+    subgraph molot[модульный монолит molot]
+        PAR[participant]
+        AUC[auction]
+        BIL[billing]
+        SET[settlement\nсага расчётов]
+        NOT[notification]
+    end
+    PAR -- "async: ParticipantRegisteredV1\nParticipantVerifiedV1" --> AUC
+    AUC -- "async: AuctionClosedV1\nWinnerReassignedV1" --> SET
+    BIL -- "async: InvoicePaidV1\nInvoiceExpiredV1" --> SET
+    SET -- "sync фасад: AwardToRunnerUp\nRelist / MarkSaleFailed\nConfirmSettlement" --> AUC
+    SET -- "sync фасад: IssueInvoice\nVoidInvoice" --> BIL
+    AUC -- "async: BidPlacedV1\nAuctionClosedV1\nSaleSettledV1" --> NOT
+    BIL -- "async: InvoiceIssuedV1\nInvoicePaidV1" --> NOT
+    PAR -- "async: ParticipantRegisteredV1" --> NOT
+```
+
 При этом даже синхронная связь не означает «settlement знает auction». Сага объявляет потребительский интерфейс у себя — `internal/settlement/app/handlers.go`:
 
 ```go

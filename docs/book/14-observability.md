@@ -276,6 +276,36 @@ Rate этого счётчика — ранний сигнал: база дег�
 
 ### Pipeline: от приложения до Grafana
 
+Пайплайн сигналов от приложения до дашбордов и механизм сквозной трассировки через шину:
+
+```mermaid
+flowchart LR
+    subgraph app[Приложение]
+        DEC[Декоратор\nApplyCommandDecorators]
+        SLOG[slog\nNewContextHandler]
+        OTEL[OTel SDK\nспаны и метрики]
+        WM[Watermill metadata\ntraceparent W3C]
+    end
+    OTLP[OTLP gRPC\nport 4317]
+    subgraph col[otel-collector]
+        REC[receiver otlp]
+        BATCH[processor batch]
+        EXP[exporters]
+    end
+    JAE[Jaeger\nтрейсы]
+    PROM[Prometheus\nметрики]
+    GRAF[Grafana\nдашборды]
+
+    DEC --> OTEL
+    DEC --> SLOG
+    OTEL --> OTLP
+    WM -- "inject trace context\nв metadata события" --> OTEL
+    OTLP --> REC --> BATCH --> EXP
+    EXP --> JAE
+    EXP --> PROM --> GRAF
+    JAE --> GRAF
+```
+
 `internal/common/metrics/metrics.go` и `internal/common/tracing/tracing.go` инициализируют OTLP gRPC экспортеры на один endpoint (local collector). Оба пакета — независимы: сделано намеренно (комментарий в `newResource()`), по той же логике, по которой `Money` дублируется в auction и billing.
 
 `deploy/otel-collector.yaml` описывает pipeline:

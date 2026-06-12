@@ -140,6 +140,25 @@ func (s *Settlement) InvoiceIssued(inv InvoiceID) error {
 не зацикливается внутри одной саги, а порождает следующую — и `relistGen` нового лота
 гарантирует, что цепочка оборвётся после первого перевыставления.
 
+Полная машина состояний саги — все рёбра и все терминалы:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Started : AuctionClosedV1 sold / INSERT ON CONFLICT DO NOTHING
+    Started --> AwaitingPayment : effect IssueInvoice attempt 1
+    AwaitingPayment --> Settled : InvoicePaidV1 / effect ConfirmSettlement
+    AwaitingPayment --> AwardingRunnerUp : InvoiceExpiredV1 runnerUpQualifies attempt 1 / effect AwardToRunnerUp
+    AwaitingPayment --> Relisted : InvoiceExpiredV1 нет runner-up relistGen 0 / MarkSaleFailed и Relist
+    AwaitingPayment --> FailedUnsold : InvoiceExpiredV1 нет runner-up relistGen 1 / MarkSaleFailed
+    AwardingRunnerUp --> SecondChancePayment : WinnerReassignedV1 / effect IssueInvoice attempt 2
+    SecondChancePayment --> Settled : InvoicePaidV1 / effect ConfirmSettlement
+    SecondChancePayment --> Relisted : InvoiceExpiredV1 или Decline relistGen 0 / VoidInvoice и MarkSaleFailed и Relist
+    SecondChancePayment --> FailedUnsold : InvoiceExpiredV1 или Decline relistGen 1 / VoidInvoice и MarkSaleFailed
+    Settled --> [*]
+    Relisted --> [*]
+    FailedUnsold --> [*]
+```
+
 ### 10.2. Decide-фазы — чистые функции
 
 Принципиальное решение: **решение отделено от исполнения**. Все decide-методы агрегата —

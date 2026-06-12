@@ -87,9 +87,50 @@ internal/auction/
 Правила направления — не конвенция, а CI-барьер. Импорт нарушителя падает в
 пайплайне до code review.
 
----
+Диаграмма показывает направление зависимостей: все стрелки смотрят внутрь — к домену. Три модели одной сущности существуют в разных слоях и связываются только через маппинг в адаптере.
 
-### Одна сущность в трёх представлениях
+```mermaid
+flowchart TB
+    subgraph driving[Driving ports]
+        HTTP[HTTP-хендлер\nports/http.go]
+        WRK[Воркер закрытия\nports/worker.go]
+        EVT[Event-подписчик\nports/events.go]
+    end
+    subgraph app[App-слой]
+        CMD[command handlers\napp/command/]
+        QRY[query handlers\napp/query/]
+    end
+    subgraph domain[Domain]
+        AGG[Auction агрегат\ndomain/auction/]
+        REPO_IF[Repository interface\ndomain/auction/]
+    end
+    subgraph adapters[Adapters driven]
+        PG[Postgres-репозиторий\nadapters/pg_repository.go]
+        RM[Read models\nadapters/pg_read_models.go]
+    end
+
+    HTTP --> CMD
+    HTTP --> QRY
+    WRK --> CMD
+    EVT --> CMD
+
+    CMD --> AGG
+    CMD --> REPO_IF
+    QRY --> REPO_IF
+
+    PG -.реализует.-> REPO_IF
+    RM -.реализует.-> REPO_IF
+
+    subgraph models[Три модели одной сущности — маппинг явный в адаптере]
+        PG_M[pgAuction\nsql.NullInt64 / uuid.NullUUID]
+        DOM_M[Auction\nMoney / BiddingWindow]
+        DTO_M[AuctionCardView\nплоские примитивы]
+    end
+    PG_M -->|toDomainAuction| DOM_M
+    DOM_M -->|adapterMap| DTO_M
+```
+
+Правило: `ports` не импортирует `adapters` — только `app.Application`.
 
 Посмотрим на лот аукциона в трёх слоях — и поймём, почему у каждого своя
 модель.

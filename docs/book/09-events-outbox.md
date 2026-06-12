@@ -266,6 +266,35 @@ func NewTxPublisher(tx *sql.Tx, logger wm.LoggerAdapter) (message.Publisher, err
 tx-publisher схему не трогает никогда; топики инициализируют подписчики
 и pool-publisher-ы на старте процесса.
 
+Последовательность ниже показывает, почему атомарность достигается конструктивно: INSERT события в outbox — это часть той же транзакции, что UPDATE агрегата. Поллер и хендлер живут вне транзакции издателя.
+
+```mermaid
+sequenceDiagram
+    participant H as Command Handler
+    participant DB as Postgres
+    participant OB as outbox таблица
+    participant P as Watermill Poller
+    participant EH as Event Handler
+
+    H->>DB: BEGIN транзакция
+    H->>DB: UPDATE auction.auctions version+1
+    H->>OB: INSERT watermill_auction_events payload
+    note over DB,OB: одна транзакция — атомарно
+    H->>DB: COMMIT
+    DB-->>H: ok
+
+    P->>OB: SELECT next offset FOR UPDATE SKIP LOCKED
+    OB-->>P: сообщение
+    P->>EH: доставить
+    EH->>EH: обработать идемпотентно
+    alt успех
+        EH-->>P: ack
+        P->>OB: UPDATE offset
+    else ошибка 5 раз
+        P->>OB: перенос в dead_letter
+    end
+```
+
 ### Postgres как шина: таблица = топик, группа = хендлер
 
 watermill-sql превращает таблицу `watermill_auction_events`
