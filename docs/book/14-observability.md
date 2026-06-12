@@ -4,7 +4,7 @@
 
 Три часа ночи. Телефон вибрирует. Продавцы пишут в поддержку, что расчёты «зависли». Вы открываете ноутбук — и не видите ничего. CPU спокоен. Memory в норме. В логах тишина, потому что ошибку никто не записал. Трейсов нет вовсе. А ведь тесты были зелёные, CI прошёл, деплой состоялся ещё днём. Система сломана, и единственный источник информации об этом — рассерженные пользователи.
 
-Эта глава о том, как сделать, чтобы в такую ночь у вас были ответы. Мы разберём, почему три сигнала — логи, трейсы и метрики — должны рождаться в одном месте кода, а не размазываться по хендлерам; как сквозной трейс собирает четырёхконтекстную цепочку «молоток → счёт → оплата → расчёт» в одну временну́ю шкалу в Jaeger; и какие именно метрики отвечают на главный вопрос дежурного: «где и почему».
+Эта глава о том, как сделать, чтобы в такую ночь у вас были ответы. Мы разберём, почему три сигнала — логи, трейсы и метрики — должны рождаться в одном месте кода, а не размазываться по хендлерам; как сквозной трейс собирает четырёхконтекстную цепочку от молотка через счёт и оплату до расчёта в одну временну́ю шкалу в Jaeger; и какие именно метрики отвечают на главный вопрос дежурного: «где и почему».
 
 Сам этот вопрос — «что я захочу узнать первым в три часа ночи?» — будет сквозной линзой главы. Каждую метрику и каждый сигнал мы проверим им. Если сигнал на него не отвечает, это украшение дашборда, а не инструмент.
 
@@ -248,7 +248,7 @@ otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 | Фасад саги | `facade/auction.AwardToRunnerUp` |
 | PSP | `psp.Charge` (атрибут idempotency_key) |
 
-Путь «молоток → счёт → оплата → расчёт» — это один трейс с 67 спанами. В Jaeger видно: Settlement handler стартовал через 12 мс после закрытия аукциона, PSP Charge занял 340 мс, а вся сага от AuctionClosedV1 до ConfirmSettlement — 1.2 с.
+Путь от молотка через счёт и оплату до расчёта — это один трейс с 67 спанами. В Jaeger видно: Settlement handler стартовал через 12 мс после закрытия аукциона, PSP Charge занял 340 мс, а вся сага от AuctionClosedV1 до ConfirmSettlement — 1.2 с.
 
 Вернёмся к ночному дежурному. Если PSP начинает тормозить, он увидит это на спане `psp.Charge` раньше, чем ухудшится какая-либо RED-метрика команды PayInvoice — потому что трейс показывает конкретный участок цепи, а метрика — только агрегат поверх него. Это и есть разделение труда: метрика будит, трейс показывает где.
 
@@ -286,7 +286,7 @@ retryCounter := func(h message.HandlerFunc) message.HandlerFunc {
 
 На что смотреть: счётчик инкрементируется на каждую неудачную попытку, а не на сообщение — поэтому его rate чувствителен к самым ранним признакам деградации. Вопрос дежурного: «есть ли систематические ошибки в каком-то хендлере?» База начала подтормаживать, ретраи пошли — но до dead-letter ещё далеко. Это та самая метрика, которая будит вас за час до настоящего пожара, а не во время него.
 
-**`molot_saga_transitions_total{from, to, reason}`** — counter из settlement repo-адаптера. В норме большинство transitions — `AwaitingPayment → Settled`. Вопрос дежурного (а чаще — продакта утром): «какой процент аукционов не завершается оплатой с первой попытки?» Рост `reason=second_chance_declined` говорит о поведении пользователей; рост `AwaitingPayment → Relisted` с `reason=payment_timeout` — о проблемах с PSP или UX оплаты. Одна метрика, два очень разных диагноза — поэтому лейбл `reason` здесь не роскошь.
+**`molot_saga_transitions_total{from, to, reason}`** — counter из settlement repo-адаптера. В норме большинство transitions — из `AwaitingPayment` в `Settled`. Вопрос дежурного (а чаще — продакта утром): «какой процент аукционов не завершается оплатой с первой попытки?» Рост `reason=second_chance_declined` говорит о поведении пользователей; рост переходов из `AwaitingPayment` в `Relisted` с `reason=payment_timeout` — о проблемах с PSP или UX оплаты. Одна метрика, два очень разных диагноза — поэтому лейбл `reason` здесь не роскошь.
 
 **`molot_settlement_nonterminal_age_seconds`** — максимальный возраст саги, не достигшей терминального состояния (Settled / Relisted / FailedUnsold). Вопрос дежурного: «есть ли зависшие саги?» — тот самый вопрос, на который в начале главы некому было ответить. Алерт: > 2×PAYMENT_TERM. В дашборде — stat с оранжевым при 1×PAYMENT_TERM и красным при 2×. Если метрика растёт монотонно — сага застряла: событие потеряно или лежит в dead-letter. Первый шаг расследования прописан заранее: открыть `molot-bus-saga`, проверить dead-letter.
 
@@ -444,6 +444,6 @@ r.Get("/readyz", func(w http.ResponseWriter, req *http.Request) {
 - `internal/common/tracing/tracing.go` — `NewTracerProvider`, W3C propagator.
 - `internal/common/metrics/metrics.go` — `NewMeterProvider`, runtime instrumentation.
 - `internal/common/server/server.go` — `RegisterHealthEndpoints`, `ReadinessProbe`, `spanRouteNamer`.
-- `deploy/otel-collector.yaml` — pipeline app → collector → Jaeger / Prometheus.
+- `deploy/otel-collector.yaml` — pipeline из приложения через collector в Jaeger / Prometheus.
 - `deploy/grafana/dashboards/molot-contexts-red.json` — RED-дашборд команд/запросов: rate, error rate, p95/p99 per handler.
 - `deploy/grafana/dashboards/molot-bus-saga.json` — дашборд шины и саги: dead-letter (stat + time series), oldest message age, retries by handler, saga transitions, nonterminal age, worker backlog.

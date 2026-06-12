@@ -636,7 +636,7 @@ func TestCriticalPath(t *testing.T) {
 - [ ] Если это domain-тест: пакет `_test`, ноль моков, фикстуры через доменный API, `t.Parallel()` на функции и на каждом подтесте.
 - [ ] Если это app-тест: spy записывает вызовы, тест проверяет содержимое (не только факт вызова), нет бизнес-ветвления.
 - [ ] Если это integration-тест: shared suite, `t.Parallel()`, уникальные ID, нет cleanup, есть rollback-тест и race-тест.
-- [ ] Если это component-тест: `NewComponentTestApplication` → общий `newApplication`, readyz перед тестом, только happy path.
+- [ ] Если это component-тест: `NewComponentTestApplication` делегирует общему `newApplication`, readyz перед тестом, только happy path.
 - [ ] Нет `time.Sleep` как основного ожидания — только поллинг с deadline.
 - [ ] Нет `require.*` внутри `assert.Eventually` — только `assert.*` и `*Poll`-хелперы.
 - [ ] Тест прогоняется с `-race`.
